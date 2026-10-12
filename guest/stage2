@@ -1,0 +1,45 @@
+#!/bin/bash
+# PID 1, stage two, inside the overlay. There is no network card: the only way out is two
+# vsock bridges to the host, which decides what is allowed and logs everything.
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts -o gid=5,mode=620,ptmxmode=666
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+hostname popcorn
+ip link set lo up
+
+# How Claude Code should present its (placeholder) credential; the host swaps in the real one.
+auth=key
+for arg in $(cat /proc/cmdline); do case "$arg" in popcorn.auth=*) auth="${arg#popcorn.auth=}";; esac; done
+echo "$auth" > /run/popcorn-auth
+
+# Rename the account to the person using Popcorn, so the prompt reads name@popcorn.
+# The host only ever sends a name that passed strict account-name rules.
+user=analyst
+for arg in $(cat /proc/cmdline); do case "$arg" in popcorn.user=*) user="${arg#popcorn.user=}";; esac; done
+if [ "$user" != analyst ] && id analyst >/dev/null 2>&1 && ! id "$user" >/dev/null 2>&1; then
+  usermod -l "$user" -d "/home/$user" -m analyst && groupmod -n "$user" analyst
+  echo "$user ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/analyst
+fi
+id "$user" >/dev/null 2>&1 || user=analyst
+home="/home/$user"
+echo "$user" > /run/popcorn-user
+
+# Host CID is 2. 1080: allowlisted egress (HTTP CONNECT). 1081: Anthropic API, key added on host.
+socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:1080 &
+socat TCP-LISTEN:8080,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:1081 &
+# Host-initiated: 1024 is a login shell, 1025 receives files (a tar stream) into ~/inbox.
+socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"su - $user",pty,stderr,setsid,sigint,sane,ctty &
+socat VSOCK-LISTEN:1025,fork,reuseaddr EXEC:/usr/local/bin/popcorn-inbox &
+# 1026 sends ~/outbox to the host when you ask for it: regular files only, at most 50 MB each.
+socat VSOCK-LISTEN:1026,fork,reuseaddr EXEC:/usr/local/bin/popcorn-outbox &
+# 1027 receives a shared folder snapshot into ~/work/<name>; 1028 sends it back for review.
+socat VSOCK-LISTEN:1027,fork,reuseaddr EXEC:/usr/local/bin/popcorn-share-in &
+socat VSOCK-LISTEN:1028,fork,reuseaddr EXEC:/usr/local/bin/popcorn-share-out &
+
+# ponytail: the host stops a case by killing the VM, so flush the case disk often.
+while true; do sleep 3; sync; done

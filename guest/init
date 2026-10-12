@@ -1,0 +1,11 @@
+#!/bin/sh
+# PID 1, stage one. The golden image (/dev/vda) is mounted read-only as /. Lay this case's
+# own disk (/dev/vdb) over it, so every change made in the case lands on the case disk only.
+mount -t proc proc /proc
+mount -t devtmpfs dev /dev
+mount -t tmpfs tmpfs /run   # / is read-only; mount points live here
+mkdir -p /run/case
+mount -t ext4 /dev/vdb /run/case
+mkdir -p /run/case/upper /run/case/work /run/case/root
+mount -t overlay overlay -o lowerdir=/,upperdir=/run/case/upper,workdir=/run/case/work /run/case/root
+exec chroot /run/case/root /sbin/popcorn-stage2

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Popcorn
+Comment=Security workbench: disposable, isolated machines for risky work
+Exec=popcorn
+Icon=popcorn
+Terminal=false
+Categories=Security;Development;
+StartupWMClass=popcorn

@@ -1,0 +1,20 @@
+[package]
+name = "popcorn"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["wayland", "x11"] }
+include_dir = "0.7"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# libc >= 0.2.17x dropped ENOATTR on Linux; zed-async-tar pins xattr 0.2 which still uses it.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
