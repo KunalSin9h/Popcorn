@@ -1,7 +1,5 @@
 <p align="center">
-  <img src="https://github.githubassets.com/images/icons/emoji/unicode/1f37f.png" width="88" alt="🍿">
-  &nbsp;&nbsp;
-  <img src="https://github.githubassets.com/images/icons/emoji/unicode/1f33d.png" width="88" alt="🌽">
+  <img src="assets/popcorn.png" width="120" alt="Popcorn">
 </p>
 
 <h1 align="center">Popcorn</h1>
