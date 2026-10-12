@@ -114,6 +114,10 @@ sequenceDiagram
 
 ## Quick start
 
+<a href="https://github.com/KunalSin9h/popcorn/releases/latest"><img src="https://img.shields.io/badge/Download-for%20Linux-F0BE2C?style=for-the-badge&labelColor=B23A2E&logo=linux&logoColor=white" alt="Download for Linux"></a>
+
+
+
 Popcorn runs on Linux with KVM. Read [docs/DEV.md](docs/DEV.md) for system packages.
 
 ```sh
