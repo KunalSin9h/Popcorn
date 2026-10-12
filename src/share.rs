@@ -72,15 +72,15 @@ pub fn check_source(path: &Path) -> Result<(), String> {
     let p = path.canonicalize().map_err(|e| e.to_string())?;
     let home = std::env::home_dir().and_then(|h| h.canonicalize().ok()).unwrap_or_default();
     if p == Path::new("/") || home.starts_with(&p) {
-        return Err(format!("{} holds your whole home folder. Pick a project folder or specific files.", p.display()));
+        return Err(format!("{} contains your home folder. Select a project folder or specific files.", p.display()));
     }
     if p.is_file() {
         let size = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        return if size > MAX_BYTES { Err(format!("{} is over 1 GB.", p.display())) } else { Ok(()) };
+        return if size > MAX_BYTES { Err(format!("{} is larger than 1 GB.", p.display())) } else { Ok(()) };
     }
     for secret in [".ssh", ".gnupg", ".aws", ".config"] {
         if p.join(secret).exists() {
-            return Err(format!("{} contains {secret}. Pick a folder without your keys or settings in it.", p.display()));
+            return Err(format!("{} contains {secret}. Select a folder without keys or settings.", p.display()));
         }
     }
     let (mut bytes, mut files) = (0u64, 0u64);
@@ -95,7 +95,7 @@ pub fn check_source(path: &Path) -> Result<(), String> {
                 bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
             }
             if bytes > MAX_BYTES || files > MAX_FILES {
-                return Err(format!("{} is too big for a corn (over 1 GB or 20,000 files). Pick a smaller folder.", p.display()));
+                return Err(format!("{} is too large. The limit is 1 GB or 20,000 files.", p.display()));
             }
         }
     }
@@ -107,11 +107,11 @@ pub fn check_source(path: &Path) -> Result<(), String> {
 pub fn send(dir: &Path, log: &Log, host: &Path) -> Result<usize, String> {
     let host = host.canonicalize().map_err(|e| e.to_string())?;
     if !host.is_dir() {
-        return Err("Pick a folder".into());
+        return Err("Select a folder.".into());
     }
     check_source(&host)?;
     fs::write(dir.join("share"), host.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-    let share = get(dir).ok_or("That folder name can't be used")?;
+    let share = get(dir).ok_or("Popcorn cannot use this folder name.")?;
     // Pack to a file on disk, never into memory. Links are stored as links, never followed,
     // so nothing outside the folder is read.
     let snapshot = dir.join("snapshot.tar");
@@ -125,7 +125,7 @@ pub fn send(dir: &Path, log: &Log, host: &Path) -> Result<usize, String> {
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         fs::remove_file(&snapshot).ok();
-        return Err(format!("Could not pack the folder: {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")));
+        return Err(format!("Popcorn cannot pack the folder: {}", String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")));
     }
     let mut m = BTreeMap::new();
     gate::read_tar(fs::File::open(&snapshot).map_err(|e| e.to_string())?, |parts, body| {
@@ -154,7 +154,7 @@ fn staging(dir: &Path) -> PathBuf {
 /// Bring the corn's copy back into staging (on your computer, inside the corn's folder) and list
 /// what differs from what was shared.
 pub fn pull(dir: &Path) -> Result<Vec<Change>, String> {
-    let share = get(dir).ok_or("No folder is shared with this corn")?;
+    let share = get(dir).ok_or("This corn has no shared folder.")?;
     let stage = staging(dir);
     fs::remove_dir_all(&stage).ok();
     fs::create_dir_all(&stage).map_err(|e| e.to_string())?;
@@ -208,16 +208,16 @@ pub fn diff(dir: &Path, c: &Change) -> String {
 fn target(root: &Path, rel: &str, create_dirs: bool) -> Result<PathBuf, String> {
     let parts: Vec<&str> = rel.split('/').collect();
     if parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
-        return Err(format!("Refused unsafe path {rel}"));
+        return Err(format!("Refused {rel}: the path is not safe."));
     }
     let mut p = root.to_path_buf();
     for (i, part) in parts.iter().enumerate() {
         p.push(part);
         let last = i == parts.len() - 1;
         match fs::symlink_metadata(&p) {
-            Ok(m) if m.file_type().is_symlink() => return Err(format!("Refused {rel}: it goes through a link")),
-            Ok(m) if !last && !m.is_dir() => return Err(format!("Refused {rel}: a file is in the way")),
-            Ok(m) if last && !m.is_file() => return Err(format!("Refused {rel}: not a regular file")),
+            Ok(m) if m.file_type().is_symlink() => return Err(format!("Refused {rel}: the path goes through a link.")),
+            Ok(m) if !last && !m.is_dir() => return Err(format!("Refused {rel}: a file blocks the path.")),
+            Ok(m) if last && !m.is_file() => return Err(format!("Refused {rel}: it is not a regular file.")),
             Err(_) if !last && create_dirs => fs::create_dir(&p).map_err(|e| e.to_string())?,
             _ => {}
         }
@@ -227,7 +227,7 @@ fn target(root: &Path, rel: &str, create_dirs: bool) -> Result<PathBuf, String> 
 
 /// Write one approved change to your folder.
 pub fn apply(dir: &Path, log: &Log, c: &Change) -> Result<(), String> {
-    let share = get(dir).ok_or("No folder is shared with this corn")?;
+    let share = get(dir).ok_or("This corn has no shared folder.")?;
     let mut m = manifest(dir);
     match c.kind {
         Kind::Deleted => {

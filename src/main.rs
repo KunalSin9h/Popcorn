@@ -46,6 +46,9 @@ struct Popcorn {
     claude_skipped: bool,
     /// The Connect Claude dialog is open.
     connecting: bool,
+    settings: bool,
+    /// The Erase button was pressed once; the next press erases.
+    confirm_erase: bool,
     /// The setup command was just copied; the button says so.
     copied: bool,
     focus: FocusHandle,
@@ -212,9 +215,9 @@ fn ago(at: u64) -> String {
 
 fn running_for(d: Duration) -> String {
     match d.as_secs() {
-        s if s < 60 => "Running, started just now".into(),
-        s if s < 3600 => format!("Running for {} min", s / 60),
-        s => format!("Running for {} h {} min", s / 3600, (s % 3600) / 60),
+        s if s < 60 => "Running. Started less than 1 min ago.".into(),
+        s if s < 3600 => format!("Running. Started {} min ago.", s / 60),
+        s => format!("Running. Started {} h {} min ago.", s / 3600, (s % 3600) / 60),
     }
 }
 
@@ -293,6 +296,8 @@ impl Popcorn {
             has_name: sandbox::user_name().is_some(),
             claude_skipped: std::env::home_dir().is_some_and(|h| h.join(".config/popcorn/claude-skipped").exists()),
             connecting: false,
+            settings: false,
+            confirm_erase: false,
             copied: false,
             focus: cx.focus_handle(),
             notice: None,
@@ -349,6 +354,12 @@ impl Popcorn {
 
     fn on_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
         let k = &e.keystroke;
+        if self.settings && k.key == "escape" {
+            self.settings = false;
+            self.confirm_erase = false;
+            cx.notify();
+            return;
+        }
         if self.deleting.is_some() {
             match k.key.as_str() {
                 "escape" => self.deleting = None,
@@ -419,9 +430,9 @@ impl Popcorn {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child(format!("Delete {name}?")))
                         .child(div().text_color(t.muted).line_height(px(21.)).child(if exported {
-                            "This stops the machine and erases its disk, its activity and the files you exported from it. Copies you made elsewhere are not touched."
+                            "This stops the corn. It erases the disk, the activity and the exported files. Copies in other folders do not change."
                         } else {
-                            "This stops the machine and erases its disk and activity. Nothing on your computer is touched, including a shared folder."
+                            "This stops the corn. It erases the disk and the activity. Files on your computer do not change."
                         }))
                         .child(
                             div()
@@ -550,12 +561,12 @@ impl Popcorn {
                     .child(block(
                         div().text_size(px(62.)).line_height(px(72.)).child("🍿").into_any_element(),
                         "Popcorn",
-                        "A workbench for risky work: untrusted code, suspicious packages, binaries you would never run on your own machine. You and Claude do the work inside a corn, and your computer stays out of reach.",
+                        "Popcorn is a workbench for risky work. Use it for untrusted code, suspicious packages and unknown binaries. You and Claude do the work in a corn. Your computer stays isolated.",
                     ))
                     .child(block(
                         div().text_size(px(62.)).line_height(px(72.)).child("🌽").into_any_element(),
                         "Corn",
-                        "A small, disposable virtual machine with its own Linux kernel. It cannot see your files, SSH keys or network. Every connection waits for your answer, your Claude token is added outside it, and files come back only when you approve them. Done? Delete it.",
+                        "A corn is a small virtual machine with its own Linux kernel. It cannot see your files, SSH keys or network. Each connection waits for your approval. Your Claude token stays outside the corn. Files come back only after you approve them. When you finish, delete the corn.",
                     ))
                     .child(div().pl(px(100.)).flex().child(button("lets-go", None, "Let's go!", Look::Primary).h(px(42.)).px_6().text_size(px(15.)).on_click(cx.listener(|this, _, window, cx| {
                         this.intro_seen = true;
@@ -617,7 +628,7 @@ impl Popcorn {
                     .gap_2()
                     .text_size(px(13.))
                     .text_color(t.muted)
-                    .child("No token yet? Run this in a terminal:")
+                    .child("No token? Run this command in a terminal:")
                     .child(
                         div()
                             .h(px(28.))
@@ -652,6 +663,178 @@ impl Popcorn {
                     cx.notify();
                 }))))
             })
+    }
+
+    /// Start over: stop and delete every corn, and forget your name, token and settings.
+    /// The workbench image stays, because it holds nothing personal and takes minutes to build.
+    fn erase_all(&mut self) {
+        for c in self.cases.drain(..) {
+            c.delete();
+        }
+        if let Some(cfg) = std::env::home_dir().map(|h| h.join(".config/popcorn")) {
+            std::fs::remove_dir_all(cfg).ok();
+        }
+        std::fs::remove_dir_all(sandbox::home().join("cases")).ok();
+        self.selected = 0;
+        self.has_name = false;
+        self.has_key = gate::credential().is_some();
+        self.claude_skipped = false;
+        self.intro_seen = false;
+        self.name.clear();
+        self.token.clear();
+        self.review = None;
+        self.appearance = Appearance::load();
+        self.settings = false;
+        self.confirm_erase = false;
+        self.notice = None;
+    }
+
+    /// App settings, one section per topic. Add new sections here.
+    fn settings_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.settings {
+            return None;
+        }
+        let t = theme();
+        let current = self.appearance;
+        let section = |title: &str| div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(t.muted).child(title.to_string());
+        let mode = |a: Appearance, label: &'static str, icon: &'static str| {
+            let on = a == current;
+            div()
+                .id(label)
+                .flex_1()
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when(on, |d| d.bg(t.bg).font_weight(FontWeight::MEDIUM).border_1().border_color(t.seam))
+                .when(!on, |d| d.text_color(t.muted).hover(|s| s.text_color(t.fg)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.appearance = a;
+                    a.save();
+                    this.apply_appearance(window);
+                    cx.notify();
+                }))
+                .child(ui_icon(icon).size(px(14.)).text_color(if on { t.fg } else { t.muted }))
+                .child(label)
+        };
+        let claude = match gate::credential_hint() {
+            Some(hint) => div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(ui_icon("claude-code").size(px(16.)).text_color(t.muted))
+                .child(div().flex_1().min_w_0().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child("Connected")).child(div().text_size(px(12.5)).text_color(t.muted).font_family(CODE_FONT).truncate().child(hint)))
+                .child(button("disconnect", None, "Disconnect", Look::Plain).text_color(t.bad).on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = match gate::remove_credential() {
+                        Ok(()) => {
+                            this.has_key = false;
+                            // Setup stays done: you can connect again from here or from a corn.
+                            this.claude_skipped = true;
+                            if let Some(p) = std::env::home_dir().map(|h| h.join(".config/popcorn/claude-skipped")) {
+                                std::fs::write(p, "").ok();
+                            }
+                            None
+                        }
+                        Err(e) => Some((e, false)),
+                    };
+                    cx.notify();
+                })))
+                .into_any_element(),
+            None => div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(ui_icon("claude-code").size(px(16.)).text_color(t.muted))
+                .child(div().flex_1().flex().items_center().gap_1p5().child(div().font_weight(FontWeight::MEDIUM).child("Not connected")).child(ui_icon("unplug").size(px(13.)).text_color(t.bad)))
+                .child(button("settings-connect", None, "Connect", Look::Plain).on_click(cx.listener(|this, _, window, cx| {
+                    this.settings = false;
+                    this.connecting = true;
+                    window.focus(&this.token_focus);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        };
+        Some(
+            div()
+                .id("settings-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0., 0., 0., 0.32))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.settings = false;
+                    this.confirm_erase = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(460.))
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_5()
+                        .bg(t.bg)
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(t.seam)
+                        .shadow_xl()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Settings"))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(section("Appearance"))
+                                .child(div().p(px(2.)).flex().gap_0p5().rounded(px(7.)).bg(t.surface).child(mode(Appearance::Light, "Light", "sun")).child(mode(Appearance::Dark, "Dark", "moon")).child(mode(Appearance::System, "System", "monitor"))),
+                        )
+                        .child(div().h(px(1.)).bg(t.seam))
+                        .child(div().flex().flex_col().gap_2().child(section("Claude")).child(claude))
+                        .child(div().h(px(1.)).bg(t.seam))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(section("Data"))
+                                .child(div().text_size(px(12.5)).text_color(t.muted).line_height(px(18.)).child(if self.confirm_erase {
+                                            "This deletes all corns, your name, your Claude token and your settings. You cannot undo this."
+                                        } else {
+                                            "Delete all corns and settings. The workbench image stays."
+                                        }))
+                                .child(div().flex().gap_2().when(self.confirm_erase, |d| {
+                                            d.child(button("cancel-erase", None, "Cancel", Look::Quiet).on_click(cx.listener(|this, _, _, cx| {
+                                                this.confirm_erase = false;
+                                                cx.notify();
+                                            })))
+                                        })
+                                        .child(button("erase", None, if self.confirm_erase { "Erase all" } else { "Erase Popcorn data" }, if self.confirm_erase { Look::Danger } else { Look::Plain }).when(!self.confirm_erase, |d| d.text_color(t.bad)).on_click(cx.listener(|this, _, window, cx| {
+                                            if this.confirm_erase {
+                                                this.erase_all();
+                                                this.apply_appearance(window);
+                                                window.focus(&this.focus);
+                                            } else {
+                                                this.confirm_erase = true;
+                                            }
+                                            cx.notify();
+                                        })))),
+                        )
+                        .when_some(self.notice.clone().filter(|(_, ok)| !ok), |d, (msg, _)| d.child(div().text_size(px(13.)).text_color(t.bad).child(msg)))
+                        .child(div().flex().justify_end().child(button("settings-close", None, "Close", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
+                            this.settings = false;
+                            cx.notify();
+                        })))),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Add a Claude token after setup was skipped.
@@ -690,7 +873,7 @@ impl Popcorn {
                         .shadow_xl()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Connect Claude"))
-                        .child(div().text_color(t.muted).line_height(px(21.)).child("Paste a long-lived token. It stays on this computer. Popcorn adds it to requests when they leave a corn."))
+                        .child(div().text_color(t.muted).line_height(px(21.)).child("Paste a long-lived token. The token stays on this computer. Popcorn adds it to each request that leaves a corn."))
                         .child(self.token_form(false, window, cx)),
                 )
                 .into_any_element(),
@@ -729,8 +912,8 @@ impl Popcorn {
                 self.notice = None;
                 self.connecting = false;
             }
-            Err(_) if self.token.is_empty() => self.notice = Some(("Paste the token first. It starts with sk-ant-.".into(), false)),
-            Err(_) => self.notice = Some((format!("Tokens start with sk-ant-. This one starts with \"{}\".", self.token.chars().take(6).collect::<String>()), false)),
+            Err(_) if self.token.is_empty() => self.notice = Some(("Paste the token first. A Claude token starts with sk-ant-.".into(), false)),
+            Err(_) => self.notice = Some((format!("A Claude token starts with sk-ant-. This one starts with \"{}\".", self.token.chars().take(6).collect::<String>()), false)),
         }
     }
 
@@ -770,12 +953,12 @@ impl Popcorn {
     fn send_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(c) = self.case() else { return };
         let (dir, log) = (c.dir.clone(), c.log.clone());
-        self.notice = Some(("Copying the folder into the corn…".into(), true));
+        self.notice = Some(("Popcorn copies the folder into the corn…".into(), true));
         cx.spawn(async move |this, cx| {
             let r = cx.background_executor().spawn(async move { share::send(&dir, &log, &path) }).await;
             this.update(cx, |this, cx| {
                 this.notice = Some(match r {
-                    Ok(n) => (format!("Copied {n} files. .git and ignored files stayed on your computer."), true),
+                    Ok(n) => (format!("Copied {n} files. Popcorn did not copy .git and ignored files."), true),
                     Err(e) => (e, false),
                 });
                 cx.notify();
@@ -793,7 +976,7 @@ impl Popcorn {
             let r = cx.background_executor().spawn(async move { share::pull(&dir) }).await;
             this.update(cx, |this, cx| {
                 match r {
-                    Ok(changes) if changes.is_empty() => this.notice = Some(("No changes yet.".into(), true)),
+                    Ok(changes) if changes.is_empty() => this.notice = Some(("There are no changes.".into(), true)),
                     Ok(changes) => {
                         this.notice = None;
                         this.review = Some(Review { corn, changes, open: None });
@@ -835,7 +1018,7 @@ impl Popcorn {
             let r = cx.background_executor().spawn(async move { sandbox::export(&dir, &log) }).await;
             this.update(cx, |this, cx| {
                 this.notice = Some(match r {
-                    Ok((_, 0)) => ("The outbox is empty. Ask Claude to save results in ~/outbox, then export again.".into(), false),
+                    Ok((_, 0)) => ("The outbox is empty. Tell Claude to save results in ~/outbox. Then export again.".into(), false),
                     Ok((path, n)) => {
                         std::process::Command::new("xdg-open").arg(&path).spawn().ok();
                         (format!("Exported {n} file{} to {}", if n == 1 { "" } else { "s" }, path.display()), true)
@@ -862,7 +1045,7 @@ impl Popcorn {
                 std::fs::create_dir_all(sandbox::home()).ok();
                 let out = std::fs::File::create(&l).map_err(|e| e.to_string())?;
                 let status = std::process::Command::new(script).stdout(out.try_clone().unwrap()).stderr(out).status().map_err(|e| e.to_string())?;
-                if status.success() { Ok(()) } else { Err("The image build stopped. Its log is in build.log.".to_string()) }
+                if status.success() { Ok(()) } else { Err("The image build stopped. Read build.log for the cause.".to_string()) }
             });
             // Show the last line of the build log while it runs.
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
@@ -894,7 +1077,6 @@ impl Popcorn {
         let mac = cfg!(target_os = "macos");
         let controls = window.window_controls();
         let maximized = window.is_maximized();
-        let dark = self.appearance.is_dark(window.appearance());
         let ready = sandbox::golden().exists() && (self.has_key || self.claude_skipped) && self.has_name;
         let selected = self.selected;
         let tabs: Vec<AnyElement> = if !ready { Vec::new() } else { self
@@ -1000,10 +1182,10 @@ impl Popcorn {
                     cx.notify();
                 }))))
             }))
-            .child(div().flex().items_center().gap_0p5().child(control_like("theme", if dark { "sun" } else { "moon" }, cx.listener(|this, _, window, cx| {
-                this.appearance = if this.appearance.is_dark(window.appearance()) { Appearance::Light } else { Appearance::Dark };
-                this.appearance.save();
-                this.apply_appearance(window);
+            .child(div().flex().items_center().gap_0p5().child(control_like("settings", "settings", cx.listener(|this, _, window, cx| {
+                this.settings = true;
+                this.notice = None;
+                window.focus(&this.focus);
                 cx.notify();
             }))).when(!mac, |d| {
                 d.when(controls.minimize, |d| d.child(control("min", "minus", WindowControlArea::Min, false, |w| w.minimize_window())))
@@ -1116,16 +1298,16 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(div().text_size(px(48.)).line_height(px(56.)).mb_2().child("🍿"))
+                                .child(div().text_size(px(62.)).line_height(px(72.)).mb_2().child("🍿"))
                                 .child(div().text_size(px(30.)).font_weight(FontWeight::SEMIBOLD).line_height(px(36.)).child("Set up your workbench"))
-                                .child(div().text_size(px(15.)).text_color(t.muted).line_height(px(23.)).child("A place for risky work. Each corn runs in its own microVM with its own kernel, and cannot see your files, your SSH keys or your network. Three steps, once.")),
+                                .child(div().text_size(px(15.)).text_color(t.muted).line_height(px(23.)).child("Do these three steps one time. Each corn is a microVM with its own kernel. A corn cannot see your files, SSH keys or network.")),
                         )
                         .child(
                             div()
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(1, self.has_name, "What should corns call you?", ""))
+                                .child(step(1, self.has_name, "Your name", ""))
                                 .when(!self.has_name, |d| {
                                     d.child(
                                         div()
@@ -1146,7 +1328,7 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(2, image, "Build the workbench image", "Debian with Node, Python, git, curl, strace and Claude Code, ready in every corn. Built with Docker on this computer in a few minutes."))
+                                .child(step(2, image, "Build the workbench image", "Popcorn uses Docker to build a Debian image. It has Node, Python, git, curl, strace and Claude Code. All corns use it. The build takes a few minutes."))
                                 .when(!image, |d| d.child(div().pl(px(42.)).flex().child(build))),
                         )
                         .child(
@@ -1154,7 +1336,7 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(3, self.has_key, "Connect Claude", "Get a long-lived token and paste it below. It stays on this computer; Popcorn adds it to requests as they leave a corn, so code inside can never read it."))
+                                .child(step(3, self.has_key, "Connect Claude", "Paste a long-lived token below. The token stays on this computer. Popcorn adds it to each request that leaves a corn. Code in a corn cannot read it."))
                                 .when(self.has_name && !self.has_key, |d| {
                                     d.child(div().pl(px(42.)).child(self.token_form(true, window, cx)))
                                 }),
@@ -1179,9 +1361,9 @@ impl Popcorn {
                     .flex()
                     .flex_col()
                     .gap_3()
-                    .child(img("icons/popcorn.png").size(px(56.)).mb_3())
-                    .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).child("Pop your first corn"))
-                    .child(div().text_size(px(15.)).text_color(t.muted).line_height(px(23.)).child("A corn is a disposable machine for one risky job: untrusted code, a suspicious download, a binary you don't trust. Whatever runs in it stays in it."))
+                    .child(div().text_size(px(62.)).line_height(px(72.)).mb_3().child("🌽"))
+                    .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).child("Create your first corn"))
+                    .child(div().text_size(px(15.)).text_color(t.muted).line_height(px(23.)).child("A corn is a machine for one risky job. Examples are untrusted code and suspicious downloads. All that runs in a corn stays in the corn."))
                     .child(div().mt_4().flex().child(button("first", Some("plus"), "New corn", Look::Primary).on_click(cx.listener(|this, _, _, cx| {
                         this.new_case();
                         cx.notify();
@@ -1244,7 +1426,7 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_0p5()
-                                .child(div().text_size(px(13.)).child("This corn is trying to connect to"))
+                                .child(div().text_size(px(13.)).child("This corn tries to connect to"))
                                 .child(
                                     div()
                                         .flex()
@@ -1257,7 +1439,7 @@ impl Popcorn {
                                     div()
                                         .text_size(px(12.5))
                                         .opacity(0.75)
-                                        .child(format!("Held open. Refused in {left}s if you don't answer{}.", if more > 0 { format!(" · {more} more waiting") } else { String::new() })),
+                                        .child(format!("The connection waits for you. Popcorn refuses it in {left}s.{}", if more > 0 { format!(" {more} more requests wait.") } else { String::new() })),
                                 ),
                         )
                         .child(decide("deny", "Deny", "D", Answer::Deny))
@@ -1307,7 +1489,7 @@ impl Popcorn {
                         .child(ui_icon(if open.is_some() { "chevron-down" } else { "chevron-right" }).size(px(14.)).text_color(t.faint))
                         .child(div().w(px(64.)).flex_shrink_0().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(color).child(label))
                         .child(div().flex_1().min_w_0().truncate().font_family(CODE_FONT).text_size(px(13.)).child(rel))
-                        .when(c.host_moved, |d| d.child(div().flex_shrink_0().text_size(px(12.)).text_color(t.signal).child("Also changed on your side")))
+                        .when(c.host_moved, |d| d.child(div().flex_shrink_0().text_size(px(12.)).text_color(t.signal).child("You also changed this file")))
                         .child(button(("deny-change", i), None, "Deny", Look::Quiet).h(px(28.)).on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.decide_change(i, false);
@@ -1335,7 +1517,7 @@ impl Popcorn {
                                 let color = if l.starts_with('+') { t.ok } else if l.starts_with('-') { t.bad } else if l.starts_with("@@") { t.faint } else { t.muted };
                                 div().whitespace_nowrap().text_color(color).child(if l.is_empty() { " ".to_string() } else { l.to_string() })
                             }))
-                            .when(diff.is_empty(), |d| d.child(div().text_color(t.muted).child("Binary or empty file."))),
+                            .when(diff.is_empty(), |d| d.child(div().text_color(t.muted).child("This file is binary or empty."))),
                     )
                 })
         });
@@ -1363,7 +1545,7 @@ impl Popcorn {
                             cx.notify();
                         }))),
                 )
-                .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("Only what you approve is written to your folder."))
+                .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("Popcorn writes only the changes that you approve."))
                 .children(rows)
                 .into_any_element(),
         )
@@ -1383,7 +1565,7 @@ impl Popcorn {
                         .py_8()
                         .text_color(t.muted)
                         .line_height(px(22.))
-                        .child(if running { "Nothing has crossed the airlock yet. Open a terminal, drop files anywhere on this window, and get to work." } else { "Start the corn. Everything it sends or receives will show up here." }),
+                        .child(if running { "No traffic yet. Open a terminal, drop files on this window, then start work." } else { "Start the corn. Popcorn shows all of its traffic here." }),
                 )
             })
             .children(events.iter().rev().take(300).map(|e| {
@@ -1420,48 +1602,69 @@ impl Popcorn {
         let t = theme();
         let sealed = c.mode == Mode::Sealed;
         let mine: Vec<String> = c.policy.allow.lock().unwrap().iter().cloned().collect();
-        let lane = |icon: &'static str, name: &str, rule: &str, count: usize, color: Hsla| {
+        let lane_with = |icon: &'static str, tint: Hsla, name: &str, badge: Option<AnyElement>, rule: &str, count: usize, color: Hsla| {
             div()
                 .py_3()
                 .flex()
                 .items_start()
                 .gap_3()
-                .child(div().mt(px(2.)).child(ui_icon(icon).size(px(16.)).text_color(t.muted)))
+                .child(div().h(px(22.)).flex().items_center().child(ui_icon(icon).size(px(16.)).text_color(tint)))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().font_weight(FontWeight::MEDIUM).child(name.to_string()))
+                        .child(div().h(px(22.)).flex().items_center().gap_1p5().child(div().font_weight(FontWeight::MEDIUM).child(name.to_string())).children(badge))
                         .child(div().text_size(px(12.5)).text_color(t.muted).line_height(px(18.)).child(rule.to_string())),
                 )
-                .child(div().font_family(CODE_FONT).text_size(px(15.)).font_weight(FontWeight::MEDIUM).text_color(if count > 0 { color } else { t.faint }).child(count.to_string()))
+                .child(div().h(px(22.)).flex().items_center().font_family(CODE_FONT).text_size(px(15.)).font_weight(FontWeight::MEDIUM).text_color(if count > 0 { color } else { t.faint }).child(count.to_string()))
         };
+        let lane = |icon: &'static str, name: &str, rule: &str, count: usize, color: Hsla| lane_with(icon, t.muted, name, None, rule, count, color);
+        // Disconnected: a small red mark after the name. Click it to connect. Connected: nothing.
+        let unplugged = (!self.has_key).then(|| {
+            div()
+                .id("claude-unplugged")
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bad.opacity(0.14)))
+                .tooltip(|_, cx| cx.new(|_| Tip("Claude is not connected. Click to connect.")).into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.connecting = true;
+                    this.notice = None;
+                    window.focus(&this.token_focus);
+                    cx.notify();
+                }))
+                .child(ui_icon("unplug").size(px(13.)).text_color(t.bad))
+                .into_any_element()
+        });
         div()
             .w(px(330.))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .child(div().pb_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The airlock"))
-            .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("Everything between this computer and the corn passes here."))
+            .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("All traffic between this computer and the corn goes through here."))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .child(if self.has_key {
-                        lane("sparkles", "Claude", "Always on, through its own channel. Your token is added out here, never inside.", x.claude, t.fg)
-                    } else {
-                        lane("sparkles", "Claude", "Not connected. Corns work without it.", x.claude, t.faint).child(button("connect", None, "Connect", Look::Plain).h(px(28.)).on_click(cx.listener(|this, _, window, cx| {
-                            this.connecting = true;
-                            this.notice = None;
-                            window.focus(&this.token_focus);
-                            cx.notify();
-                        })))
-                    })
-                    .child(lane("network", "Network", if sealed { "Every connection is refused and logged." } else { "Every new host waits for your answer." }, x.allowed + x.refused, if x.refused > 0 { t.bad } else { t.ok }))
-                    .child(lane("upload", "Files in", "Dropped here, they land in ~/inbox.", x.files_in, t.fg))
-                    .child(lane("folder-lock", "Files out", "Only what you export from ~/outbox, as inert copies.", x.files_out, t.fg)),
+                    .child(lane_with(
+                        "claude-code",
+                        t.muted,
+                        "Claude",
+                        unplugged,
+                        if self.has_key { "Claude Code connects to Anthropic. Popcorn adds your token outside the corn." } else { "Not connected. Click the red icon to connect." },
+                        x.claude,
+                        t.fg,
+                    ))
+                    .child(lane("network", "Network", if sealed { "Popcorn refuses and records each connection." } else { "Each new host waits for your approval." }, x.allowed + x.refused, if x.refused > 0 { t.bad } else { t.ok }))
+                    .child(lane("upload", "Files in", "Files that you drop or copy in go to ~/inbox.", x.files_in, t.fg))
+                    .child(lane("folder-lock", "Files out", "Only files that you export from ~/outbox. They cannot run.", x.files_out, t.fg)),
             )
             .child(div().pt_6().pb_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Shared folder"))
             .child(match share::get(&c.dir) {
@@ -1469,12 +1672,12 @@ impl Popcorn {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(div().text_size(px(13.)).text_color(t.faint).child("The corn gets a copy. Changes come back only when you approve them."))
+                    .child(div().text_size(px(13.)).text_color(t.faint).child("The corn gets a copy. Changes come back only after you approve them."))
                     .child(div().flex().child(button("share", Some("folder-lock"), "Share a folder", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
                         if this.case().is_some_and(|c| c.running()) {
                             this.share_folder(cx);
                         } else {
-                            this.notice = Some(("Start the corn, then share a folder.".into(), false));
+                            this.notice = Some(("Start the corn. Then share a folder.".into(), false));
                         }
                         cx.notify();
                     }))))
@@ -1504,7 +1707,7 @@ impl Popcorn {
                 }
             })
             .child(div().pt_6().pb_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Always allowed"))
-            .when(mine.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("Hosts you always allow show up here.")))
+            .when(mine.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("Hosts that you always allow show here.")))
             .children(mine.into_iter().enumerate().map(|(i, h)| {
                 let host = h.clone();
                 div()
@@ -1643,7 +1846,7 @@ impl Popcorn {
                                     .child(match (running, started) {
                                         (true, Some(s)) => running_for(s.elapsed()),
                                         (true, None) => "Running".into(),
-                                        _ => "Stopped. The disk is kept until you delete the corn.".into(),
+                                        _ => "Stopped. Popcorn keeps the disk until you delete the corn.".into(),
                                     }),
                             )
                             .child(
@@ -1655,7 +1858,8 @@ impl Popcorn {
                                     .text_color(t.muted)
                                     .child("Network")
                                     .child(div().p(px(2.)).flex().gap_0p5().rounded(px(7.)).bg(t.surface).child(network(Mode::Ask, "Ask before connecting")).child(network(Mode::Sealed, "Sealed"))),
-                            ),
+                            )
+
                     ),
             )
             .when(running, |d| {
@@ -1696,7 +1900,7 @@ impl Popcorn {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 let Some(c) = this.case() else { return };
                 if !c.running() {
-                    this.notice = Some(("Start the corn, then drop the files again.".into(), false));
+                    this.notice = Some(("Start the corn. Then drop the files again.".into(), false));
                     cx.notify();
                     return;
                 }
@@ -1724,6 +1928,16 @@ impl Popcorn {
             .child(div().h(px(1.)).flex_shrink_0().bg(t.seam))
             .child(div().id("case-body").flex_1().min_h_0().overflow_y_scroll().px_8().py_6().flex().gap_12().child(timeline).child(airlock))
             .into_any_element()
+    }
+}
+
+/// A small text tooltip.
+struct Tip(&'static str);
+
+impl Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = theme();
+        div().px_2().py_1().rounded(px(5.)).bg(t.fg).text_color(t.bg).text_size(px(12.)).font_family(UI_FONT).child(self.0)
     }
 }
 
@@ -1772,6 +1986,7 @@ impl Render for Popcorn {
             .child(self.titlebar(window, cx))
             .child(panel)
             .children(self.delete_dialog(cx))
+            .children(self.settings_dialog(cx))
             .children(self.connect_dialog(window, cx));
 
         // Server decorations (macOS, Windows, KDE): the platform owns the frame.

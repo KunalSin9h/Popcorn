@@ -183,11 +183,27 @@ pub fn credential() -> Option<Credential> {
     Some(Credential { kind, secret })
 }
 
+/// The token's kind and its first characters, for showing in settings. Never the whole secret.
+pub fn credential_hint() -> Option<String> {
+    let c = credential()?;
+    let kind = if c.kind == Auth::OAuth { "Long-lived token" } else { "API key" };
+    Some(format!("{kind} {}…", c.secret.chars().take(14).collect::<String>()))
+}
+
+/// Delete the saved token. Corns lose Claude at once; their next request gets "not connected".
+pub fn remove_credential() -> Result<(), String> {
+    match fs::remove_file(key_file()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// Save a key pasted by the user, readable by this user only.
 pub fn save_credential(secret: &str) -> Result<(), String> {
     let s = secret.trim();
     if !s.starts_with("sk-ant-") {
-        return Err("That does not look like a Claude key (it should start with sk-ant-)".into());
+        return Err("This is not a Claude token. A Claude token starts with sk-ant-.".into());
     }
     let p = key_file();
     fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -219,7 +235,7 @@ pub fn serve(sock: &Path, policy: Arc<Policy>, log: Log, dir: PathBuf) -> Result
                 if credential().is_none() {
                     // Tell Claude Code why, in the API's own error format, instead of a dropped connection.
                     record(&log, &dir, Event { at: now(), kind: Kind::Blocked, text: "Claude API (not connected)".into() });
-                    let body = r#"{"type":"error","error":{"type":"authentication_error","message":"Claude is not connected to this corn. In Popcorn, select Connect next to Claude."}}"#;
+                    let body = r#"{"type":"error","error":{"type":"authentication_error","message":"Claude is not connected. In Popcorn, click Connect next to Claude."}}"#;
                     let mut c = c;
                     let _ = write!(c, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                     return;

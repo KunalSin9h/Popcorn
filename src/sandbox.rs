@@ -43,7 +43,7 @@ pub fn to_user(name: &str) -> String {
 pub fn save_user_name(name: &str) -> Result<String, String> {
     let u = to_user(name);
     if !valid_user(&u) {
-        return Err("Use letters to start, then letters, numbers or dashes.".into());
+        return Err("Start with a letter. Then use only letters, numbers and dashes.".into());
     }
     let p = std::env::home_dir().ok_or("no home folder")?.join(".config/popcorn/user");
     fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -152,7 +152,7 @@ impl Case {
             return Ok(());
         }
         if !golden().exists() {
-            return Err("The golden image is not built yet".into());
+            return Err("Build the image first.".into());
         }
         // No token yet is fine: the corn runs, and Claude inside gets a clear "not connected" error.
         let auth = gate::credential().map(|c| c.kind).unwrap_or(gate::Auth::Key);
@@ -230,8 +230,8 @@ pub fn open_in_terminal(cmd: &[&std::ffi::OsStr]) -> Result<(), String> {
         ("xterm", &["-e"]),
     ];
     let path = std::env::var_os("PATH").unwrap_or_default();
-    let (term, args) = TERMINALS.iter().find(|(t, _)| std::env::split_paths(&path).any(|d| d.join(t).exists())).ok_or("No terminal app found")?;
-    Command::new(term).args(*args).args(cmd).spawn().map_err(|e| format!("Could not open {term}: {e}"))?;
+    let (term, args) = TERMINALS.iter().find(|(t, _)| std::env::split_paths(&path).any(|d| d.join(t).exists())).ok_or("Popcorn found no terminal app.")?;
+    Command::new(term).args(*args).args(cmd).spawn().map_err(|e| format!("Popcorn cannot open {term}: {e}"))?;
     Ok(())
 }
 
@@ -291,7 +291,7 @@ pub fn attach(dir: &Path) -> ! {
     })) {
         Some(s) => s,
         None => {
-            eprintln!("Could not reach the corn. Is it running?");
+            eprintln!("Popcorn cannot connect to the corn. Make sure that it runs.");
             std::thread::sleep(std::time::Duration::from_secs(4));
             std::process::exit(1);
         }
