@@ -11,6 +11,8 @@ mount -t tmpfs tmpfs /run
 mount -t tmpfs tmpfs /tmp
 hostname popcorn
 ip link set lo up
+# Let any user ping without special file capabilities (they do not survive the image build).
+sysctl -qw net.ipv4.ping_group_range="0 2147483647"
 
 # How Claude Code should present its (placeholder) credential; the host swaps in the real one.
 auth=key

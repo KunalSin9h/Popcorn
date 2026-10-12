@@ -3,8 +3,14 @@
 FROM node:22-bookworm
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      socat iproute2 sudo strace ltrace jq file binutils procps less vim-tiny unzip xz-utils \
-      python3-pip python3-venv ca-certificates git curl tree ripgrep \
+      socat iproute2 sudo procps less vim-tiny tree ripgrep jq ca-certificates git curl wget \
+      python3-pip python3-venv sqlite3 openssl htop \
+      `# network: most of these only reach localhost, a corn has no network card` \
+      iputils-ping dnsutils netcat-openbsd net-tools lsof tcpdump \
+      `# tracing and reverse engineering` \
+      strace ltrace gdb file binutils elfutils patchelf xxd bsdextrautils yara \
+      `# archives and metadata` \
+      unzip xz-utils p7zip-full cabextract libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force

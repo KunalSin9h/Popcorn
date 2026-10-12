@@ -74,14 +74,54 @@ cargo build --release
 Rebuild the image after you change a file in `guest/`. Running corns keep the old image until
 you stop and start them.
 
+## Releases
+
+A release has four files: an AppImage, a `.deb`, the compressed workbench image and `SHA256SUMS`.
+
+| Part | Where it comes from |
+|---|---|
+| App version | `version` in `Cargo.toml` |
+| Workbench image | `golden-<version>.ext4.zst`, built by `scripts/release-image.sh` |
+| Image hash | Compiled into the app from `POPCORN_IMAGE_SHA256` |
+| Firecracker, jailer, kernel | Inside both packages, in `/usr/lib/popcorn` |
+
+To make a release, change the version in `Cargo.toml`, commit, then push a tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The `release` workflow builds the image, tests, packages and publishes. To build the same files
+locally:
+
+```sh
+./scripts/fetch-firecracker.sh
+./scripts/release-image.sh      # dist/golden-<version>.ext4.zst and its .sha256
+./scripts/package.sh all        # dist/Popcorn-<version>-x86_64.AppImage, dist/popcorn_<version>_amd64.deb
+```
+
+How images work in a release:
+
+- On first run, the app downloads the image for its own version from the GitHub release.
+- The app checks the SHA-256 of the download against the hash compiled into it. It unpacks
+  nothing before the check passes.
+- Each version has its own file, `images/golden-<version>.ext4`. A corn records its image. An
+  update does not change the image under an existing corn.
+- A development build (no `POPCORN_IMAGE_SHA256`) builds the image locally with Docker.
+- `POPCORN_IMAGE_URL` replaces the download address, for example for a mirror.
+
+The download needs a public release. For a private repository, set `POPCORN_IMAGE_URL` to an
+address that does not need a login.
+
 ## Files on disk
 
 | Path | Contents |
 |---|---|
 | `~/.local/share/popcorn/bin/` | `firecracker`, `jailer` |
 | `~/.local/share/popcorn/vmlinux` | Guest kernel |
-| `~/.local/share/popcorn/golden.ext4` | Read-only workbench image |
-| `~/.local/share/popcorn/cases/<corn>/` | `disk.ext4`, `vm.json`, `console.log`, `activity.log`, `allow`, `mode`, `title`, sockets |
+| `~/.local/share/popcorn/images/golden-<version>.ext4` | Read-only workbench image of a release |
+| `~/.local/share/popcorn/golden.ext4` | Read-only workbench image of a development build |
+| `~/.local/share/popcorn/cases/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `allow`, `mode`, `title`, sockets |
 | `~/.config/popcorn/` | `user`, `claude-key` (mode 0600), `appearance`, `claude-skipped` |
 
 ## Vsock channels

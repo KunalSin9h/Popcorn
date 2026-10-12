@@ -3820,7 +3820,9 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "include_dir",
+ "ring",
  "rustls",
+ "ruzstd",
  "webpki-roots",
 ]
 
@@ -4572,6 +4574,15 @@ dependencies = [
  "unicode-ccc 0.4.0",
  "unicode-properties",
  "unicode-script",
+]
+
+[[package]]
+name = "ruzstd"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7c1c839d570d835527c9a5e4db7cb2198683a988cb9d7293fc8674e6bd58fc8"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -5687,6 +5698,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "typeid"

@@ -873,7 +873,7 @@ impl Popcorn {
                         .shadow_xl()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Connect Claude"))
-                        .child(div().text_color(t.muted).line_height(px(21.)).child("Paste a long-lived token. The token stays on this computer. Popcorn adds it to each request that leaves a corn."))
+                        .child(div().text_color(t.muted).line_height(px(21.)).child("The token stays on this computer. Popcorn adds it only to requests to api.anthropic.com."))
                         .child(self.token_form(false, window, cx)),
                 )
                 .into_any_element(),
@@ -1025,6 +1025,42 @@ impl Popcorn {
                     }
                     Err(e) => (e, false),
                 });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Release builds download the image; development builds make it with Docker.
+    fn get_image(&mut self, cx: &mut Context<Self>) {
+        if sandbox::IMAGE_SHA256.is_none() {
+            return self.build_image(cx);
+        }
+        self.build = Build::Running("Downloading…".into());
+        let got = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (g, flag) = (got.clone(), done.clone());
+        cx.spawn(async move |this, cx| {
+            let task = cx.background_executor().spawn(async move {
+                let _set = Finish(flag);
+                sandbox::download_image(&g)
+            });
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                let mb = got.load(std::sync::atomic::Ordering::Relaxed) / (1 << 20);
+                this.update(cx, |this, cx| {
+                    this.build = Build::Running(if mb == 0 { "Downloading…".into() } else { format!("Downloaded {mb} MB") });
+                    cx.notify();
+                })
+                .ok();
+            }
+            let r = task.await;
+            this.update(cx, |this, cx| {
+                this.build = match r {
+                    Ok(()) => Build::Idle,
+                    Err(e) => Build::Failed(e),
+                };
                 cx.notify();
             })
             .ok();
@@ -1250,9 +1286,10 @@ impl Popcorn {
                 .items_center()
                 .gap_3()
                 .child(div().text_color(t.bad).child(e.clone()))
-                .child(button("build", Some("hammer"), "Build again", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.build_image(cx))))
+                .child(button("build", Some("hammer"), "Try again", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))))
                 .into_any_element(),
-            Build::Idle => button("build", Some("hammer"), "Build the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.build_image(cx))).into_any_element(),
+            Build::Idle if sandbox::IMAGE_SHA256.is_some() => button("build", Some("upload"), "Download the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))).into_any_element(),
+            Build::Idle => button("build", Some("hammer"), "Build the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))).into_any_element(),
         };
 
         // The token field: a real input that takes typing and paste, and never shows the secret.
@@ -1328,7 +1365,11 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(2, image, "Build the workbench image", "Popcorn uses Docker to build a Debian image. It has Node, Python, git, curl, strace and Claude Code. All corns use it. The build takes a few minutes."))
+                                .child(if sandbox::IMAGE_SHA256.is_some() {
+                                    step(2, image, "Download the workbench image", "A Debian image with Node, Python, git, curl, strace and Claude Code. All corns use it. Popcorn checks the download against this release before it uses it.")
+                                } else {
+                                    step(2, image, "Build the workbench image", "Popcorn uses Docker to build a Debian image. It has Node, Python, git, curl, strace and Claude Code. All corns use it. The build takes a few minutes.")
+                                })
                                 .when(!image, |d| d.child(div().pl(px(42.)).flex().child(build))),
                         )
                         .child(
@@ -1336,7 +1377,7 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(3, self.has_key, "Connect Claude", "Paste a long-lived token below. The token stays on this computer. Popcorn adds it to each request that leaves a corn. Code in a corn cannot read it."))
+                                .child(step(3, self.has_key, "Connect Claude", "The token stays on this computer. Popcorn adds it only to requests to api.anthropic.com. Code in a corn cannot read it."))
                                 .when(self.has_name && !self.has_key, |d| {
                                     d.child(div().pl(px(42.)).child(self.token_form(true, window, cx)))
                                 }),

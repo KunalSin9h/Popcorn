@@ -8,6 +8,8 @@ gpui = { version = "0.2.2", features = ["wayland", "x11"] }
 include_dir = "0.7"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1"
+ring = "0.17"
+ruzstd = "0.8"
 
 [profile.release]
 lto = "fat"

@@ -51,8 +51,78 @@ pub fn save_user_name(name: &str) -> Result<String, String> {
     Ok(u)
 }
 
+/// The app version. Each release has a matching workbench image.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// SHA-256 of the compressed image this release expects. Set at build time for releases;
+/// unset in development builds, which build the image locally with Docker instead.
+pub const IMAGE_SHA256: Option<&str> = option_env!("POPCORN_IMAGE_SHA256");
+
+/// The image new corns use. Releases keep one file for each version, so an update never
+/// changes the image under an existing corn.
 pub fn golden() -> PathBuf {
-    home().join("golden.ext4")
+    match IMAGE_SHA256 {
+        Some(_) => home().join("images").join(format!("golden-{VERSION}.ext4")),
+        None => home().join("golden.ext4"),
+    }
+}
+
+/// Where Firecracker, the jailer and the guest kernel are: inside the AppImage, beside an
+/// installed binary (`/usr/lib/popcorn`), or in the data folder for development.
+pub fn vm_file(name: &str) -> PathBuf {
+    let mut places = Vec::new();
+    if let Some(dir) = std::env::var_os("APPDIR") {
+        places.push(PathBuf::from(dir).join("usr/lib/popcorn"));
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.join("../lib/popcorn"))) {
+        places.push(dir);
+    }
+    places.push(home());
+    places.push(home().join("bin"));
+    places.iter().map(|p| p.join(name)).find(|p| p.exists()).unwrap_or_else(|| home().join(name))
+}
+
+/// Download the release image, check it against the hash built into the app, then unpack it.
+/// The check runs before any byte of the download is parsed. `got` counts downloaded bytes.
+pub fn download_image(got: &std::sync::atomic::AtomicU64) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let want = IMAGE_SHA256.ok_or("This build has no image to download.")?;
+    let url = std::env::var("POPCORN_IMAGE_URL").unwrap_or_else(|_| format!("https://github.com/KunalSin9h/popcorn/releases/download/v{VERSION}/golden-{VERSION}.ext4.zst"));
+    let dir = home().join("images");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let zst = dir.join(format!("golden-{VERSION}.ext4.zst.part"));
+    let mut curl = Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&zst).arg(&url).spawn().map_err(|e| format!("Popcorn needs curl to download the image: {e}"))?;
+    let ok = loop {
+        if let Some(st) = curl.try_wait().map_err(|e| e.to_string())? {
+            break st.success();
+        }
+        got.store(fs::metadata(&zst).map(|m| m.len()).unwrap_or(0), Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+    if !ok {
+        fs::remove_file(&zst).ok();
+        return Err("The download failed. Check your connection, then try again.".into());
+    }
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut f = fs::File::open(&zst).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    let have: String = ctx.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    if have != want {
+        fs::remove_file(&zst).ok();
+        return Err("The downloaded image does not match this release. Popcorn deleted it.".into());
+    }
+    let part = dir.join(format!("golden-{VERSION}.ext4.part"));
+    let mut dec = ruzstd::decoding::StreamingDecoder::new(fs::File::open(&zst).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let mut out = fs::File::create(&part).map_err(|e| e.to_string())?;
+    std::io::copy(&mut dec, &mut out).map_err(|e| format!("Could not unpack the image: {e}"))?;
+    fs::remove_file(&zst).ok();
+    fs::rename(&part, golden()).map_err(|e| e.to_string())
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -108,6 +178,8 @@ impl Case {
         if !ok.success() {
             return Err("mkfs.ext4 failed".into());
         }
+        // Remember the image this corn starts from, so later updates leave it alone.
+        fs::write(dir.join("image"), golden().to_string_lossy().as_bytes()).ok();
         Ok(Case::open(dir))
     }
 
@@ -151,8 +223,10 @@ impl Case {
         if self.running() {
             return Ok(());
         }
-        if !golden().exists() {
-            return Err("Build the image first.".into());
+        // Corns made before images had versions use the old single image file.
+        let image = fs::read_to_string(self.dir.join("image")).map(|p| PathBuf::from(p.trim())).unwrap_or_else(|_| home().join("golden.ext4"));
+        if !image.exists() {
+            return Err(format!("This corn needs the image {}. It is not on this computer.", image.display()));
         }
         // No token yet is fine: the corn runs, and Claude inside gets a clear "not connected" error.
         let auth = gate::credential().map(|c| c.kind).unwrap_or(gate::Auth::Key);
@@ -171,17 +245,17 @@ impl Case {
   "machine-config": {{"vcpu_count": 2, "mem_size_mib": 2048}},
   "vsock": {{"guest_cid": 3, "uds_path": "{sock}"}}
 }}"#,
-            kernel = home().join("vmlinux").display(),
+            kernel = vm_file("vmlinux").display(),
             auth = auth.as_str(),
             user = user_name().unwrap_or_else(|| "analyst".into()),
-            golden = golden().display(),
+            golden = image.display(),
             disk = self.dir.join("disk.ext4").display(),
             sock = self.sock().display(),
         );
         fs::write(self.dir.join("vm.json"), config).map_err(|e| e.to_string())?;
         let console = fs::File::create(self.dir.join("console.log")).map_err(|e| e.to_string())?;
         // ponytail: plain firecracker as this user; wrap in `jailer` (needs root) for a second wall.
-        let child = Command::new(home().join("bin/firecracker"))
+        let child = Command::new(vm_file("firecracker"))
             .args(["--no-api", "--config-file"])
             .arg(self.dir.join("vm.json"))
             .stdin(Stdio::null())
@@ -211,7 +285,13 @@ impl Case {
 
     /// Open a terminal window with a shell inside the case.
     pub fn open_terminal(&self) -> Result<(), String> {
+        // After an upgrade or rebuild replaces the running binary, Linux reports its path with
+        // " (deleted)". The new binary at the same path attaches the same way, so use it.
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        let me = match me.to_string_lossy().strip_suffix(" (deleted)") {
+            Some(path) => PathBuf::from(path),
+            None => me,
+        };
         open_in_terminal(&[me.as_os_str(), "attach".as_ref(), self.dir.as_os_str()])
     }
 }
@@ -447,6 +527,7 @@ mod tests {
         let c_txt = fs::read_to_string(host.join("c.txt")).unwrap_or_default();
         let a_kept = host.join("a.txt").exists();
         fs::remove_dir_all(&host).ok();
+        let ping = sh(&mut s, "ping -c1 -W2 127.0.0.1 | grep -c ' 0% packet loss'", Duration::from_secs(10));
         let ver = sh(&mut s, "claude --version", Duration::from_secs(30));
         eprintln!("--- claude: {ver}");
 
@@ -461,6 +542,7 @@ mod tests {
         assert!(env.lines().any(|l| l.trim().trim_start_matches("\u{1b}[?2004l").trim() == "0"), "the host key is not in the guest environment: {env}");
         assert_eq!(n, 1, "only the regular file comes out");
         assert!(exported, "the report reached the quarantine folder");
+        assert!(ping.lines().any(|l| l.trim().trim_start_matches("\u{1b}[?2004l").trim() == "1"), "ping works for the user: {ping}");
         assert!(!inside.contains("secret.env") && !inside.contains(".git/"), "ignored files and .git stay home: {inside}");
         assert!(inside.contains("./src/b.rs") && inside.contains("./a.txt"));
         assert_eq!(summary.len(), 3, "{summary:?}");
@@ -538,5 +620,35 @@ mod attach_tests {
         case.delete();
         assert!(out.is_some(), "command ran");
         assert!(worst < Duration::from_millis(150), "echo took {worst:?}");
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    /// Needs dist/ from scripts/release-image.sh and a build with POPCORN_IMAGE_SHA256 set:
+    /// POPCORN_IMAGE_SHA256=$(cut -d' ' -f1 dist/*.sha256) cargo test --release -- --ignored download
+    #[test]
+    #[ignore]
+    fn download_checks_the_hash_then_unpacks() {
+        let dist = concat!(env!("CARGO_MANIFEST_DIR"), "/dist");
+        let home = std::env::temp_dir().join(format!("popcorn-dl-{}", std::process::id()));
+        unsafe {
+            std::env::set_var("POPCORN_HOME", &home);
+            std::env::set_var("POPCORN_IMAGE_URL", format!("file://{dist}/golden-{}.ext4.zst", super::VERSION));
+        }
+        let got = std::sync::atomic::AtomicU64::new(0);
+        super::download_image(&got).unwrap();
+        let size = std::fs::metadata(super::golden()).unwrap().len();
+        assert!(size > 1 << 30, "unpacked image is {size} bytes");
+
+        // A file that does not match the built-in hash is refused and deleted.
+        let bad = home.join("bad.zst");
+        std::fs::write(&bad, b"not the image").unwrap();
+        std::fs::remove_file(super::golden()).unwrap();
+        unsafe { std::env::set_var("POPCORN_IMAGE_URL", format!("file://{}", bad.display())) };
+        let err = super::download_image(&got).unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+        assert!(!super::golden().exists());
+        std::fs::remove_dir_all(&home).ok();
     }
 }

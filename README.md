@@ -29,14 +29,14 @@ kernel. It starts in about one second. When you finish, you delete it.
 
 | Guarantee | How |
 |---|---|
-| A corn has its own kernel | Each corn is a KVM virtual machine, not a container. A kernel exploit stays in the corn. |
-| A corn has no network card | The only way out is vsock to Popcorn. There is no route to your network. |
-| You approve each new host | The network gate holds each new connection until you answer. No answer in 90 s means no. |
-| Your Claude token stays outside | Claude Code in the corn has a placeholder. Popcorn adds the real token on the way out. |
-| A corn cannot see your files | Popcorn mounts no host folder. The corn sees a read-only image and its own disk. |
-| Files come out only when you ask | Popcorn pulls files. A corn cannot push. Popcorn keeps only regular files and removes links, devices and unsafe paths. |
-| Changes to your folder need your approval | Popcorn writes approved files only. It refuses paths that leave the folder or go through a link. |
-| Secrets stay home | Popcorn refuses to share your home folder, or a folder with `.ssh`, `.gnupg`, `.aws` or `.config`. `.git` and ignored files stay out. |
+| A corn has its own kernel | Each corn is a separate virtual machine, not a container. A kernel exploit stays inside the corn. |
+| A corn has no network card | Its only link is a private channel to Popcorn. It has no route to your network or the internet. |
+| You approve each new host | Popcorn holds each new connection and asks you. If you do not answer in 90 seconds, Popcorn refuses it. |
+| Your Claude token stays outside | Claude Code in the corn has only a fake token. Popcorn adds your real token to requests to `api.anthropic.com`. |
+| A corn cannot see your files | No folder from your computer is connected to a corn. A corn has only its own Linux system and its own disk. |
+| Files come out only when you export them | A corn cannot send files to your computer. Exported files are plain copies, and they cannot run. |
+| Your folder changes only with your approval | You review each changed file. Popcorn writes only the files that you approve, and only inside that folder. |
+| Your keys stay outside | Popcorn does not share your home folder, or a folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It also leaves out `.git` and ignored files. |
 
 ### Limits
 
