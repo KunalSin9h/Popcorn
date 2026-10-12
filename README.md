@@ -16,7 +16,7 @@
 Popcorn is a desktop app for Linux. Use it for untrusted code, suspicious packages and unknown
 binaries. You and Claude Code do the work in a corn. Your files, keys and network stay outside.
 
-A corn is a [Firecracker](https://firecracker-microvm.github.io/) microVM. It has its own Linux
+🌽 A corn is a [Firecracker](https://firecracker-microvm.github.io/) microVM. It has its own Linux
 kernel. It starts in about one second. When you finish, you delete it.
 
 - **Open a terminal** in a corn. Claude Code is ready inside.
