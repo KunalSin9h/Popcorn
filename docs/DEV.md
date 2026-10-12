@@ -121,7 +121,7 @@ address that does not need a login.
 | `~/.local/share/popcorn/vmlinux` | Guest kernel |
 | `~/.local/share/popcorn/images/golden-<version>.ext4` | Read-only workbench image of a release |
 | `~/.local/share/popcorn/golden.ext4` | Read-only workbench image of a development build |
-| `~/.local/share/popcorn/cases/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `allow`, `mode`, `title`, sockets |
+| `~/.local/share/popcorn/corns/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `allow`, `mode`, `title`, `inbox.sent`, `share`, sockets. Older versions used `cases/`; Popcorn moves it. |
 | `~/.config/popcorn/` | `user`, `claude-key` (mode 0600), `appearance`, `claude-skipped` |
 
 ## Vsock channels
@@ -173,8 +173,8 @@ rm -rf $H
 
 ## Debugging
 
-- **A corn does not boot.** Read `cases/<corn>/console.log`. It has the guest kernel and init output.
-- **A connection fails.** Read `cases/<corn>/activity.log`. Each line has a time, a verdict and a target.
+- **A corn does not boot.** Read `corns/<corn>/console.log`. It has the guest kernel and init output.
+- **A connection fails.** Read `corns/<corn>/activity.log`. Each line has a time, a verdict and a target.
 - **The terminal does not connect.** Make sure the corn runs, then run `popcorn attach <corn folder>` in a terminal.
 - **Screenshots on GNOME Wayland.** GNOME blocks screen capture. Run Popcorn under XWayland with
   `env -u WAYLAND_DISPLAY`, then capture the window with `ffmpeg -f x11grab -window_id <id>`.

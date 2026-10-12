@@ -56,6 +56,8 @@ struct Popcorn {
     notice: Option<(String, bool)>,
     /// The case the delete dialog is asking about.
     deleting: Option<usize>,
+    /// The shared folder waiting for a confirm before it replaces the corn's copy.
+    refreshing: Option<PathBuf>,
     /// The intro page was dismissed this session.
     intro_seen: bool,
     /// Changes pulled back from a corn's shared folder, waiting for your decision.
@@ -63,6 +65,9 @@ struct Popcorn {
     /// The tab being renamed, with the text typed so far.
     renaming: Option<(usize, String)>,
     rename_focus: FocusHandle,
+    /// The two scroll areas of a corn page: the timeline (or review) and the airlock column.
+    left_scroll: ScrollHandle,
+    right_scroll: ScrollHandle,
     should_move: bool,
     appearance: Appearance,
     _appearance_watch: Subscription,
@@ -153,6 +158,11 @@ enum Look {
 }
 
 fn button(id: impl Into<ElementId>, icon: Option<&'static str>, label: &str, look: Look) -> Stateful<Div> {
+    button_tinted(id, icon, None, label, look)
+}
+
+/// A button whose icon has its own color, for example a muted red for Stop.
+fn button_tinted(id: impl Into<ElementId>, icon: Option<&'static str>, tint: Option<Hsla>, label: &str, look: Look) -> Stateful<Div> {
     let t = theme();
     let (bg, fg) = match look {
         Look::Primary => (t.fg, t.bg),
@@ -176,8 +186,55 @@ fn button(id: impl Into<ElementId>, icon: Option<&'static str>, label: &str, loo
         .when(look == Look::Plain, |d| d.border_1().border_color(t.seam))
         .when(matches!(look, Look::Primary | Look::Danger), |d| d.hover(|s| s.opacity(0.88)))
         .when(matches!(look, Look::Plain | Look::Quiet), |d| d.hover(|s| s.bg(t.hover)))
-        .when_some(icon, |d, i| d.child(ui_icon(i).size(px(15.)).text_color(fg)))
+        .when_some(icon, |d, i| d.child(ui_icon(i).size(px(15.)).text_color(tint.unwrap_or(fg))))
         .child(label.to_string())
+}
+
+/// A column that scrolls on its own, with a thin themed bar while you hover an overflowing column. Scroll
+/// with the wheel or touchpad.
+/// ponytail: the bar does not take drags; add a drag handler if people reach for it.
+fn scroll_column(id: &'static str, handle: &ScrollHandle, content: AnyElement, cx: &mut Context<Popcorn>) -> Div {
+    let t = theme();
+    let view = handle.bounds().size.height;
+    let max = handle.max_offset().height;
+    let bar = (max > px(0.) && view > px(0.)).then(|| {
+        let thumb = (view * (view / (view + max))).max(px(28.));
+        let top = (view - thumb) * (-handle.offset().y / max).clamp(0., 1.);
+        div().absolute().right(px(-10.)).top(top).w(px(4.)).h(thumb).rounded(px(2.)).bg(t.faint.opacity(0.4)).invisible().group_hover(id, |s| s.visible())
+    });
+    div()
+        .group(id)
+        .relative()
+        .h_full()
+        .min_h_0()
+        .child(
+            div()
+                .id(id)
+                .size_full()
+                .overflow_y_scroll()
+                .track_scroll(handle)
+                // Redraw so the bar follows the content.
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                .child(content),
+        )
+        .children(bar)
+}
+
+/// A button with only an icon, no outline. The tooltip names it.
+fn icon_button(id: &'static str, icon: &'static str, tint: Hsla, tip: &'static str) -> Stateful<Div> {
+    let t = theme();
+    div()
+        .id(id)
+        .size(px(34.))
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .hover(|s| s.bg(t.hover))
+        .tooltip(move |_, cx| cx.new(|_| Tip(tip)).into())
+        .child(ui_icon(icon).size(px(15.)).text_color(tint))
 }
 
 /// A key cap, for the shortcuts shown next to decisions.
@@ -198,6 +255,18 @@ fn key(k: &str, on: Hsla, ink: Hsla) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(ink)
         .child(k.to_string())
+}
+
+/// Newest first, with runs of the same event folded into one entry and a count.
+fn stacked(events: &[Event]) -> Vec<(&Event, usize)> {
+    let mut out: Vec<(&Event, usize)> = Vec::new();
+    for e in events.iter().rev() {
+        match out.last_mut() {
+            Some((last, n)) if last.kind == e.kind && last.text == e.text => *n += 1,
+            _ => out.push((e, 1)),
+        }
+    }
+    out
 }
 
 fn now() -> u64 {
@@ -302,10 +371,13 @@ impl Popcorn {
             focus: cx.focus_handle(),
             notice: None,
             deleting: None,
+            refreshing: None,
             intro_seen: false,
             review: None,
             renaming: None,
             rename_focus: cx.focus_handle(),
+            left_scroll: ScrollHandle::new(),
+            right_scroll: ScrollHandle::new(),
             should_move: false,
             appearance: Appearance::load(),
             _appearance_watch: cx.observe_window_appearance(window, |this, window, cx| {
@@ -357,6 +429,11 @@ impl Popcorn {
         if self.settings && k.key == "escape" {
             self.settings = false;
             self.confirm_erase = false;
+            cx.notify();
+            return;
+        }
+        if self.refreshing.is_some() && k.key == "escape" {
+            self.refreshing = None;
             cx.notify();
             return;
         }
@@ -446,6 +523,68 @@ impl Popcorn {
                                 })))
                                 .child(button("confirm-delete", Some("trash-2"), "Delete corn", Look::Danger).on_click(cx.listener(|this, _, _, cx| {
                                     this.delete_confirmed();
+                                    cx.notify();
+                                }))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Refresh copy deletes the corn's copy first, so it asks.
+    fn refresh_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = theme();
+        let host = self.refreshing.as_ref()?;
+        let name = host.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Some(
+            div()
+                .id("refresh-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0., 0., 0., 0.32))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.refreshing = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(440.))
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .bg(t.bg)
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(t.seam)
+                        .shadow_xl()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child(format!("Replace ~/work/{name}?")))
+                        .child(div().text_color(t.muted).line_height(px(21.)).child("The corn's copy gets your folder again. Changes in the corn that you did not approve are lost. Review changes first to keep them."))
+                        .child(
+                            div()
+                                .pt_3()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(button("cancel-refresh", None, "Cancel", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
+                                    this.refreshing = None;
+                                    cx.notify();
+                                })))
+                                .child(button("review-first", Some("check"), "Review changes", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
+                                    this.refreshing = None;
+                                    this.review_changes(cx);
+                                    cx.notify();
+                                })))
+                                .child(button("confirm-refresh", None, "Replace copy", Look::Danger).on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(host) = this.refreshing.take() {
+                                        this.send_folder(host, cx);
+                                    }
                                     cx.notify();
                                 }))),
                         ),
@@ -674,7 +813,7 @@ impl Popcorn {
         if let Some(cfg) = std::env::home_dir().map(|h| h.join(".config/popcorn")) {
             std::fs::remove_dir_all(cfg).ok();
         }
-        std::fs::remove_dir_all(sandbox::home().join("cases")).ok();
+        std::fs::remove_dir_all(sandbox::corns()).ok();
         self.selected = 0;
         self.has_name = false;
         self.has_key = gate::credential().is_some();
@@ -929,7 +1068,8 @@ impl Popcorn {
 
     /// Pick files and folders and copy them into the corn's ~/inbox.
     fn copy_in(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: true, multiple: true, prompt: Some("Copy in".into()) });
+        // Files only: the system dialog in folder mode cannot select files. Drop a folder on the window to copy it.
+        let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Copy in".into()) });
         let Some(c) = self.case() else { return };
         let (dir, log) = (c.dir.clone(), c.log.clone());
         cx.spawn(async move |this, cx| {
@@ -1039,18 +1179,25 @@ impl Popcorn {
         }
         self.build = Build::Running("Downloading…".into());
         let got = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (g, flag) = (got.clone(), done.clone());
+        let (g, all, flag) = (got.clone(), total.clone(), done.clone());
         cx.spawn(async move |this, cx| {
             let task = cx.background_executor().spawn(async move {
                 let _set = Finish(flag);
-                sandbox::download_image(&g)
+                sandbox::download_image(&g, &all)
             });
             while !done.load(std::sync::atomic::Ordering::Relaxed) {
                 cx.background_executor().timer(Duration::from_millis(400)).await;
-                let mb = got.load(std::sync::atomic::Ordering::Relaxed) / (1 << 20);
+                let (g, all) = (got.load(std::sync::atomic::Ordering::Relaxed), total.load(std::sync::atomic::Ordering::Relaxed));
+                let text = match (g, all) {
+                    (u64::MAX, _) => "Checking and unpacking…".to_string(),
+                    (0, _) => "Downloading…".into(),
+                    (g, 0) => format!("Downloading… {} MB", g >> 20),
+                    (g, all) => format!("Downloading… {}%  ({} of {} MB)", g * 100 / all, g >> 20, all >> 20),
+                };
                 this.update(cx, |this, cx| {
-                    this.build = Build::Running(if mb == 0 { "Downloading…".into() } else { format!("Downloaded {mb} MB") });
+                    this.build = Build::Running(text);
                     cx.notify();
                 })
                 .ok();
@@ -1278,7 +1425,7 @@ impl Popcorn {
                 .gap_2()
                 .text_size(px(13.))
                 .text_color(t.muted)
-                .child(ui_icon("hammer").size(px(15.)).text_color(t.muted))
+                .child(ui_icon(if sandbox::IMAGE_SHA256.is_some() { "cloud-download" } else { "hammer" }).size(px(15.)).text_color(t.muted))
                 .child(div().font_family(CODE_FONT).truncate().child(if line.is_empty() { "Building…".to_string() } else { line.clone() }))
                 .into_any_element(),
             Build::Failed(e) => div()
@@ -1288,7 +1435,7 @@ impl Popcorn {
                 .child(div().text_color(t.bad).child(e.clone()))
                 .child(button("build", Some("hammer"), "Try again", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))))
                 .into_any_element(),
-            Build::Idle if sandbox::IMAGE_SHA256.is_some() => button("build", Some("upload"), "Download the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))).into_any_element(),
+            Build::Idle if sandbox::IMAGE_SHA256.is_some() => button("build", Some("cloud-download"), "Download the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))).into_any_element(),
             Build::Idle => button("build", Some("hammer"), "Build the image", Look::Primary).on_click(cx.listener(|this, _, _, cx| this.get_image(cx))).into_any_element(),
         };
 
@@ -1575,7 +1722,7 @@ impl Popcorn {
                         .items_center()
                         .gap_2()
                         .child(div().flex_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(format!("Changes to {folder}")))
-                        .child(button("done-review", None, "Done", Look::Quiet).on_click(cx.listener(|this, _, _, cx| {
+                        .child(button("done-review", None, "Close", Look::Quiet).tooltip(|_, cx| cx.new(|_| Tip("Leave the rest undecided. Review again at any time.")).into()).on_click(cx.listener(|this, _, _, cx| {
                             this.review = None;
                             cx.notify();
                         })))
@@ -1609,7 +1756,8 @@ impl Popcorn {
                         .child(if running { "No traffic yet. Open a terminal, drop files on this window, then start work." } else { "Start the corn. Popcorn shows all of its traffic here." }),
                 )
             })
-            .children(events.iter().rev().take(300).map(|e| {
+            // The same event in a row shows once, with a count: Claude Code makes many identical calls.
+            .children(stacked(events).into_iter().take(300).map(|(e, n)| {
                 let (verdict, color): (&str, Hsla) = match e.kind {
                     Kind::Blocked => ("Refused", t.bad),
                     Kind::Allowed => ("Allowed", t.ok),
@@ -1634,6 +1782,7 @@ impl Popcorn {
                             .when(e.kind != Kind::Note, |d| d.font_family(CODE_FONT).text_size(px(13.)))
                             .child(e.text.clone()),
                     )
+                    .when(n > 1, |d| d.child(div().flex_shrink_0().font_family(CODE_FONT).text_size(px(12.)).text_color(t.faint).child(format!("×{n}"))))
             }))
             .into_any_element()
     }
@@ -1684,8 +1833,6 @@ impl Popcorn {
                 .into_any_element()
         });
         div()
-            .w(px(330.))
-            .flex_shrink_0()
             .flex()
             .flex_col()
             .child(div().pb_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The airlock"))
@@ -1729,7 +1876,7 @@ impl Popcorn {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(div().font_family(CODE_FONT).text_size(px(13.)).child(format!("~/work/{}", sh.name)))
+                        .child(div().font_family(CODE_FONT).text_size(px(13.)).truncate().child(format!("~/work/{}", sh.name)))
                         .child(div().text_size(px(12.)).text_color(t.faint).truncate().child(format!("From {}", sh.host.display())))
                         .child(
                             div()
@@ -1739,10 +1886,24 @@ impl Popcorn {
                                     this.review_changes(cx);
                                     cx.notify();
                                 })))
-                                .child(button("resend", None, "Send again", Look::Quiet).on_click(cx.listener(move |this, _, _, cx| {
-                                    this.send_folder(host.clone(), cx);
-                                    cx.notify();
-                                }))),
+                                .child(
+                                    icon_button("resend", "refresh-cw", t.muted, "Refresh copy")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.refreshing = Some(host.clone());
+                                            window.focus(&this.focus);
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    icon_button("unshare", "square-stop", t.bad.opacity(0.75), "Stop sharing")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(c) = this.cases.get(this.selected) {
+                                                share::stop(&c.dir, &c.log);
+                                            }
+                                            this.review = this.review.take().filter(|r| r.corn != this.selected);
+                                            cx.notify();
+                                        })),
+                                ),
                         )
                         .into_any_element()
                 }
@@ -1779,6 +1940,7 @@ impl Popcorn {
         let events: Vec<Event> = case.log.lock().unwrap().clone();
         let x = crossings(&events);
         let airlock = self.airlock(&self.cases[self.selected], &x, cx);
+        let (left, right) = (self.left_scroll.clone(), self.right_scroll.clone());
         let timeline = match self.changes_view(cx) {
             Some(changes) => changes,
             None => self.timeline(&events, running),
@@ -1855,20 +2017,32 @@ impl Popcorn {
                             .child(div().flex_shrink_0().pl_3().text_size(px(12.)).font_weight(FontWeight::NORMAL).font_family(CODE_FONT).text_color(t.faint).child("Enter / Esc"))
                             .into_any_element(),
                         _ => div()
-                            .id("title")
                             .group("title")
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let name = this.cases.get(this.selected).map(|c| c.name.clone()).unwrap_or_default();
-                                this.renaming = Some((this.selected, name));
-                                window.focus(&this.rename_focus);
-                                cx.notify();
-                            }))
+                            .gap_1()
                             .child(div().text_size(px(28.)).font_weight(FontWeight::SEMIBOLD).line_height(px(32.)).child(name))
-                            .child(ui_icon("pencil").size(px(16.)).text_color(t.faint).invisible().group_hover("title", |s| s.visible()))
+                            .child(
+                                div()
+                                    .id("rename-pencil")
+                                    .size(px(28.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .invisible()
+                                    .group_hover("title", |s| s.visible())
+                                    .hover(|s| s.bg(t.hover))
+                                    .tooltip(|_, cx| cx.new(|_| Tip("Rename")).into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let name = this.cases.get(this.selected).map(|c| c.name.clone()).unwrap_or_default();
+                                        this.renaming = Some((this.selected, name));
+                                        window.focus(&this.rename_focus);
+                                        cx.notify();
+                                    }))
+                                    .child(ui_icon("pencil").size(px(16.)).text_color(t.faint)),
+                            )
                             .into_any_element(),
                     })
                     .child(
@@ -1904,17 +2078,17 @@ impl Popcorn {
                     ),
             )
             .when(running, |d| {
-                d.child(button("stop", Some("square-stop"), "Stop", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(c) = this.case() {
-                        c.stop();
-                    }
-                    cx.notify();
-                })))
-                .child(button("copy-in", Some("upload"), "Copy in", Look::Plain).on_click(cx.listener(|this, _, _, cx| this.copy_in(cx))))
+                d.child(button("copy-in", Some("upload"), "Copy in", Look::Plain).on_click(cx.listener(|this, _, _, cx| this.copy_in(cx))))
                 .child(button("export", Some("package"), "Export outbox", Look::Plain).on_click(cx.listener(|this, _, _, cx| this.export(cx))))
                 .child(button("term", Some("terminal"), "Open terminal", Look::Primary).on_click(cx.listener(|this, _, _, cx| {
                     let r = this.case().map(|c| c.open_terminal()).unwrap_or(Ok(()));
                     this.report(r);
+                    cx.notify();
+                })))
+                .child(button_tinted("stop", Some("square-stop"), Some(t.bad.opacity(0.75)), "Stop", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(c) = this.case() {
+                        c.stop();
+                    }
                     cx.notify();
                 })))
             })
@@ -1967,7 +2141,16 @@ impl Popcorn {
             .when_some(notice, |d, (msg, ok)| d.child(div().px_8().pb_4().text_size(px(13.)).text_color(if ok { t.ok } else { t.bad }).child(msg)))
             .children(hazard)
             .child(div().h(px(1.)).flex_shrink_0().bg(t.seam))
-            .child(div().id("case-body").flex_1().min_h_0().overflow_y_scroll().px_8().py_6().flex().gap_12().child(timeline).child(airlock))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .px_8()
+                    .flex()
+                    .gap_12()
+                    .child(div().flex_1().min_w_0().h_full().child(scroll_column("case-left", &left, div().py_6().child(timeline).into_any_element(), cx)))
+                    .child(div().w(px(330.)).flex_shrink_0().h_full().child(scroll_column("case-right", &right, div().py_6().pr(px(3.)).child(airlock).into_any_element(), cx))),
+            )
             .into_any_element()
     }
 }
@@ -2027,6 +2210,7 @@ impl Render for Popcorn {
             .child(self.titlebar(window, cx))
             .child(panel)
             .children(self.delete_dialog(cx))
+            .children(self.refresh_dialog(cx))
             .children(self.settings_dialog(cx))
             .children(self.connect_dialog(window, cx));
 

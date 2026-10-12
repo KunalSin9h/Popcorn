@@ -17,6 +17,15 @@ pub fn home() -> PathBuf {
     std::env::var_os("POPCORN_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".local/share/popcorn"))
 }
 
+/// Where corns live: `home/corns`. Older versions used `home/cases`; move it on first use.
+pub fn corns() -> PathBuf {
+    let (old, new) = (home().join("cases"), home().join("corns"));
+    if old.is_dir() && !new.exists() {
+        fs::rename(&old, &new).ok();
+    }
+    new
+}
+
 /// What the shell inside a case calls you: `name@popcorn`. Saved in ~/.config/popcorn/user.
 pub fn user_name() -> Option<String> {
     if let Ok(u) = std::env::var("POPCORN_USER") {
@@ -83,13 +92,20 @@ pub fn vm_file(name: &str) -> PathBuf {
 
 /// Download the release image, check it against the hash built into the app, then unpack it.
 /// The check runs before any byte of the download is parsed. `got` counts downloaded bytes.
-pub fn download_image(got: &std::sync::atomic::AtomicU64) -> Result<(), String> {
+/// Fills `got` with bytes downloaded and `total` with the file size, when the server says it.
+/// `got` becomes `u64::MAX` once the download is done and the check and unpack start.
+pub fn download_image(got: &std::sync::atomic::AtomicU64, total: &std::sync::atomic::AtomicU64) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     let want = IMAGE_SHA256.ok_or("This build has no image to download.")?;
     let url = std::env::var("POPCORN_IMAGE_URL").unwrap_or_else(|_| format!("https://github.com/KunalSin9h/popcorn/releases/download/v{VERSION}/golden-{VERSION}.ext4.zst"));
     let dir = home().join("images");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let zst = dir.join(format!("golden-{VERSION}.ext4.zst.part"));
+    // The size, from the last response after redirects.
+    if let Ok(o) = Command::new("curl").args(["-fsSLI"]).arg(&url).output() {
+        let len = String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse().ok())).last();
+        total.store(len.unwrap_or(0), Ordering::Relaxed);
+    }
     let mut curl = Command::new("curl").args(["-fsSL", "--retry", "3", "-o"]).arg(&zst).arg(&url).spawn().map_err(|e| format!("Popcorn needs curl to download the image: {e}"))?;
     let ok = loop {
         if let Some(st) = curl.try_wait().map_err(|e| e.to_string())? {
@@ -102,6 +118,7 @@ pub fn download_image(got: &std::sync::atomic::AtomicU64) -> Result<(), String> 
         fs::remove_file(&zst).ok();
         return Err("The download failed. Check your connection, then try again.".into());
     }
+    got.store(u64::MAX, Ordering::Relaxed);
     let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
     let mut f = fs::File::open(&zst).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; 1 << 20];
@@ -146,7 +163,7 @@ pub struct Case {
 
 impl Case {
     pub fn list() -> Vec<Case> {
-        let mut out: Vec<Case> = fs::read_dir(home().join("cases"))
+        let mut out: Vec<Case> = fs::read_dir(corns())
             .map(|rd| rd.flatten().filter(|e| e.path().join("disk.ext4").exists()).map(|e| Case::open(e.path())).collect())
             .unwrap_or_default();
         // Oldest first, so tabs keep the order they were opened in.
@@ -167,7 +184,7 @@ impl Case {
 
     /// A new case: a fresh, empty, sparse disk. Creating one takes well under a second.
     pub fn create() -> Result<Case, String> {
-        let root = home().join("cases");
+        let root = corns();
         fs::create_dir_all(&root).map_err(|e| e.to_string())?;
         let n = (1..).find(|n| !root.join(format!("case-{n}")).exists() && !root.join(format!("corn-{n}")).exists()).unwrap();
         let dir = root.join(format!("corn-{n}"));
@@ -255,14 +272,26 @@ impl Case {
         fs::write(self.dir.join("vm.json"), config).map_err(|e| e.to_string())?;
         let console = fs::File::create(self.dir.join("console.log")).map_err(|e| e.to_string())?;
         // ponytail: plain firecracker as this user; wrap in `jailer` (needs root) for a second wall.
-        let child = Command::new(vm_file("firecracker"))
-            .args(["--no-api", "--config-file"])
+        let mut cmd = Command::new(vm_file("firecracker"));
+        cmd.args(["--no-api", "--config-file"])
             .arg(self.dir.join("vm.json"))
             .stdin(Stdio::null())
             .stdout(console.try_clone().map_err(|e| e.to_string())?)
-            .stderr(console)
-            .spawn()
-            .map_err(|e| format!("could not start firecracker: {e}"))?;
+            .stderr(console);
+        // The VM dies with Popcorn, even on a crash or a kill. Otherwise it keeps running unseen,
+        // and a second start would boot a second VM on the same disk.
+        unsafe {
+            unsafe extern "C" {
+                fn prctl(option: i32, ...) -> i32;
+            }
+            const PR_SET_PDEATHSIG: i32 = 1;
+            const SIGKILL: u64 = 9;
+            std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+                prctl(PR_SET_PDEATHSIG, SIGKILL);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().map_err(|e| format!("could not start firecracker: {e}"))?;
         self.vm = Some(child);
         self.started = Some(std::time::Instant::now());
         gate::record(&self.log, &self.dir, Event::note("Corn started in its own microVM"));
@@ -316,18 +345,42 @@ pub fn open_in_terminal(cmd: &[&std::ffi::OsStr]) -> Result<(), String> {
 }
 
 /// Copy a file or folder from the host into ~/inbox in a running case, as a tar stream over vsock.
+/// A name already sent to this corn's inbox gets a number, so a copy never replaces a file.
 pub fn send(dir: &Path, log: &Log, path: &Path) -> Result<(), String> {
     crate::share::check_source(path)?;
     let (parent, name) = (path.parent().ok_or("bad path")?, path.file_name().ok_or("bad path")?);
-    let mut tar = Command::new("tar").arg("-c").arg("-C").arg(parent).arg(name).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let name_s = name.to_string_lossy().into_owned();
+    let sent_file = dir.join("inbox.sent");
+    let sent = fs::read_to_string(&sent_file).unwrap_or_default();
+    let taken = |n: &str| sent.lines().any(|l| l == n);
+    let as_name = if taken(&name_s) { (2..).map(|i| numbered(&name_s, i)).find(|n| !taken(n)).unwrap() } else { name_s.clone() };
+    let mut tar = Command::new("tar");
+    tar.arg("-c").arg("-C").arg(parent);
+    if as_name != name_s {
+        // Rename the top entry in the stream: s,^OLD,NEW, with regex and separator characters escaped.
+        let esc = |s: &str, special: &str| s.chars().flat_map(|c| if special.contains(c) { vec!['\\', c] } else { vec![c] }).collect::<String>();
+        tar.arg(format!("--transform=s,^{},{},S", esc(&name_s, "\\.[]*^$,"), esc(&as_name, "\\&,")));
+    }
+    let mut tar = tar.arg(name).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
     let mut s = connect(&dir.join("v.sock"), FILES_PORT)?;
     std::io::copy(tar.stdout.as_mut().unwrap(), &mut s).map_err(|e| e.to_string())?;
-    tar.wait().ok();
     s.shutdown(std::net::Shutdown::Write).ok();
     let mut sink = Vec::new();
     s.read_to_end(&mut sink).ok();
-    gate::record(log, dir, Event::note(&format!("Copied {} into ~/inbox", name.to_string_lossy())));
+    if !tar.wait().map(|s| s.success()).unwrap_or(false) {
+        return Err(format!("Popcorn cannot pack {name_s}."));
+    }
+    fs::OpenOptions::new().create(true).append(true).open(&sent_file).and_then(|mut f| writeln!(f, "{as_name}")).ok();
+    gate::record(log, dir, Event::note(&format!("Copied {as_name} into ~/inbox")));
     Ok(())
+}
+
+/// `report.pdf` -> `report (2).pdf`; `pkg` -> `pkg (2)`.
+fn numbered(name: &str, i: u32) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => format!("{stem} ({i}).{ext}"),
+        _ => format!("{name} ({i})"),
+    }
 }
 
 /// Pull ~/outbox from a running case into `<case>/exported/<n>`, a quarantine folder on the host.
@@ -385,21 +438,29 @@ pub fn attach(dir: &Path) -> ! {
     let name: String = case_name(dir).chars().filter(|c| c.is_alphanumeric() || " ._-".contains(*c)).collect();
     {
         let mut o = std::io::stdout();
-        // A full "lab" theme: text, background, cursor and the 16 ANSI colors.
+        // "Husk": bottle-green glass, mint text, sodium-yellow cursor. The 16 ANSI colors keep their
+        // usual meaning, tuned to read well on the green, with one change: Claude Code runs with an
+        // ANSI theme in the corn and draws its mark in bright red (slot 9), so slot 9 is mustard.
         const PALETTE: [&str; 16] = [
-            "#1b2a24", "#e36a5c", "#6fbf98", "#f0be2c", "#6fa8d6", "#c49ad8", "#5fc4b8", "#cfdcd4",
-            "#3d5249", "#f08a7e", "#8fd8b2", "#f6d264", "#94c2e8", "#d8b6e8", "#86dccf", "#eef5f0",
+            "#163d33", "#f07a62", "#9adb7e", "#f0be2c", "#7db8f0", "#e39bd0", "#5fd6c4", "#cfe0d6",
+            "#6a9486", "#d4a017", "#b8eb9c", "#ffd86a", "#a2cdf7", "#f0b8e2", "#8be6d8", "#f4faf5",
         ];
         let palette: String = PALETTE.iter().enumerate().map(|(i, c)| format!("\x1b]4;{i};{c}\x07")).collect();
-        let _ = write!(o, "\x1b]0;🍿 {name}\x07\x1b]10;#d9e6de\x07\x1b]11;#13201b\x07\x1b]12;#f0be2c\x07{palette}");
+        let _ = write!(o, "\x1b]0;🌽 {name}\x07\x1b]10;#e6efe4\x07\x1b]11;#0d2621\x07\x1b]12;#f0be2c\x07\x1b]17;#24584a\x07{palette}");
         let _ = o.flush();
     }
     let ps1 = format!(r"\[\e[1;30;43m\] {name} \[\e[0m\] \[\e[32m\]\u@popcorn\[\e[0m\]:\[\e[36m\]\w\[\e[0m\]\$ ");
-    let mut setup = format!(" export TERM={term} PS1='{ps1}'");
+    // Pass on 24-bit color, so tools with their own colors (Claude Code's orange) keep them.
+    let colorterm = std::env::var("COLORTERM").ok().filter(|c| c == "truecolor" || c == "24bit").unwrap_or_else(|| "truecolor".into());
+    let mut setup = format!(" export TERM={term} COLORTERM={colorterm} PS1='{ps1}'");
     if let Some((rows, cols)) = size.as_deref().and_then(|s| s.split_once(' ')).filter(|(r, c)| *r != "0" && *c != "0") {
         // ponytail: size is set once; resizing the window later does not reach the guest.
         setup.push_str(&format!("; stty rows {rows} cols {cols}"));
     }
+    // Claude Code in an ANSI theme takes its colors from this terminal, so its mark turns mustard.
+    // Only the image's default ("dark") is switched; a theme you picked stays.
+    // ponytail: edits ~/.claude.json on each attach; move to the image's claude.json at the next release.
+    setup.push_str(r#"; sed -i 's/"theme": *"dark"/"theme": "dark-ansi"/' ~/.claude.json 2>/dev/null"#);
     setup.push_str("; clear\n");
     let _ = s.write_all(setup.as_bytes());
     Command::new("stty").args(["raw", "-echo"]).stdin(Stdio::inherit()).status().ok();
@@ -422,7 +483,7 @@ pub fn attach(dir: &Path) -> ! {
         }
     }
     // Give the terminal its own colors back.
-    let _ = out.write_all(b"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+    let _ = out.write_all(b"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07\x1b]117\x07");
     let _ = out.flush();
     drop(out);
     Command::new("stty").arg("sane").stdin(Stdio::inherit()).status().ok();
@@ -432,6 +493,13 @@ pub fn attach(dir: &Path) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_get_numbers() {
+        assert_eq!(numbered("report.pdf", 2), "report (2).pdf");
+        assert_eq!(numbered("pkg", 3), "pkg (3)");
+        assert_eq!(numbered(".env", 2), ".env (2)");
+    }
 
     #[test]
     fn names_become_safe_account_names() {
@@ -526,6 +594,15 @@ mod tests {
         let b = fs::read_to_string(host.join("src/b.rs")).unwrap();
         let c_txt = fs::read_to_string(host.join("c.txt")).unwrap_or_default();
         let a_kept = host.join("a.txt").exists();
+        // Copy in the same file twice: the second gets a number and the first stays.
+        fs::write(host.join("a.b [x].txt"), "first").unwrap();
+        send(&case.dir, &case.log, &host.join("a.b [x].txt")).unwrap();
+        fs::write(host.join("a.b [x].txt"), "second").unwrap();
+        send(&case.dir, &case.log, &host.join("a.b [x].txt")).unwrap();
+        let inbox = sh(&mut s, "cat ~/inbox/'a.b [x].txt'; echo; cat ~/inbox/'a.b [x] (2).txt'", Duration::from_secs(10));
+        // Stop sharing: Popcorn forgets the folder.
+        crate::share::stop(&case.dir, &case.log);
+        let unshared = crate::share::get(&case.dir).is_none();
         fs::remove_dir_all(&host).ok();
         let ping = sh(&mut s, "ping -c1 -W2 127.0.0.1 | grep -c ' 0% packet loss'", Duration::from_secs(10));
         let ver = sh(&mut s, "claude --version", Duration::from_secs(30));
@@ -548,6 +625,8 @@ mod tests {
         assert_eq!(summary.len(), 3, "{summary:?}");
         assert!(b.contains("todo!()") && c_txt == "new\n", "approved changes applied");
         assert!(a_kept, "a denied deletion leaves the file alone");
+        assert!(inbox.contains("first") && inbox.contains("second"), "a copy never replaces a file: {inbox}");
+        assert!(unshared, "stop sharing forgets the folder");
     }
 }
 
@@ -636,8 +715,9 @@ mod download_tests {
             std::env::set_var("POPCORN_HOME", &home);
             std::env::set_var("POPCORN_IMAGE_URL", format!("file://{dist}/golden-{}.ext4.zst", super::VERSION));
         }
-        let got = std::sync::atomic::AtomicU64::new(0);
-        super::download_image(&got).unwrap();
+        let (got, total) = (std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0));
+        super::download_image(&got, &total).unwrap();
+        assert!(total.load(std::sync::atomic::Ordering::Relaxed) > 0, "size known before download");
         let size = std::fs::metadata(super::golden()).unwrap().len();
         assert!(size > 1 << 30, "unpacked image is {size} bytes");
 
@@ -646,7 +726,7 @@ mod download_tests {
         std::fs::write(&bad, b"not the image").unwrap();
         std::fs::remove_file(super::golden()).unwrap();
         unsafe { std::env::set_var("POPCORN_IMAGE_URL", format!("file://{}", bad.display())) };
-        let err = super::download_image(&got).unwrap_err();
+        let err = super::download_image(&got, &total).unwrap_err();
         assert!(err.contains("does not match"), "{err}");
         assert!(!super::golden().exists());
         std::fs::remove_dir_all(&home).ok();

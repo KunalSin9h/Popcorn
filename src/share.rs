@@ -147,6 +147,16 @@ pub fn send(dir: &Path, log: &Log, host: &Path) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Forget the shared folder. Your folder is not touched; the corn keeps its copy in ~/work.
+pub fn stop(dir: &Path, log: &Log) {
+    let Some(share) = get(dir) else { return };
+    for f in ["share", "share.manifest"] {
+        fs::remove_file(dir.join(f)).ok();
+    }
+    fs::remove_dir_all(staging(dir)).ok();
+    gate::record(log, dir, Event::note(&format!("Stopped sharing {}", share.name)));
+}
+
 fn staging(dir: &Path) -> PathBuf {
     dir.join("staging")
 }

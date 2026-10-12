@@ -1,5 +1,5 @@
 {
   "hasCompletedOnboarding": true,
-  "theme": "dark",
+  "theme": "dark-ansi",
   "customApiKeyResponses": { "approved": ["t-holds-the-real-key"], "rejected": [] }
 }
