@@ -19,11 +19,19 @@ binaries. You and Claude Code do the work in a corn. Your files, keys and networ
 🌽 A corn is a [Firecracker](https://firecracker-microvm.github.io/) microVM with its own Linux
 kernel. It starts in about one second.
 
+<p align="center">
+  <img src="assets/screenshots/ask.png" width="860" alt="A corn asks before it connects to github.com">
+</p>
+
+<img src="assets/screenshots/review.png" width="340" align="right" alt="Review each changed file before it is written back">
+
 - **Terminal.** Open a shell in a corn.
 - **Network.** Each new host waits for your approval: deny, allow once or always allow.
 - **Files in.** Drop files on the window, or select them. They go to `~/inbox`.
 - **Files out.** Export files from `~/outbox`. Popcorn saves them as copies that cannot run.
 - **Shared folder.** The corn gets a copy of a folder. Popcorn writes back only the changes that you approve.
+
+<br clear="right">
 
 ## How it keeps you safe
 
