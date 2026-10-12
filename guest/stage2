@@ -18,6 +18,7 @@ sysctl -qw net.ipv4.ping_group_range="0 2147483647"
 auth=key
 for arg in $(cat /proc/cmdline); do case "$arg" in popcorn.auth=*) auth="${arg#popcorn.auth=}";; esac; done
 echo "$auth" > /run/popcorn-auth
+chmod 600 /run/popcorn-auth
 
 # Rename the account to the person using Popcorn, so the prompt reads name@popcorn.
 # The host only ever sends a name that passed strict account-name rules.

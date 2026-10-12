@@ -245,7 +245,7 @@ impl Case {
         if !image.exists() {
             return Err(format!("This corn needs the image {}. It is not on this computer.", image.display()));
         }
-        // No token yet is fine: the corn runs, and Claude inside gets a clear "not connected" error.
+        // No token yet is fine: the corn runs, and Claude inside gets the API's authentication error.
         let auth = gate::credential().map(|c| c.kind).unwrap_or(gate::Auth::Key);
         for p in [self.sock(), gate::port_path(&self.sock(), 1080), gate::port_path(&self.sock(), 1081)] {
             fs::remove_file(p).ok();
@@ -549,13 +549,16 @@ mod tests {
             for _ in 0..6000 {
                 let next = { let mut v = policy.asks.lock().unwrap(); if v.is_empty() { None } else { Some(v.remove(0)) } };
                 if let Some(a) = next {
-                    let ok = a.target.starts_with("registry.npmjs.org");
+                    let ok = a.target.starts_with("registry.npmjs.org") || a.target.starts_with("localtest.me");
                     a.answer(if ok { gate::Answer::Once } else { gate::Answer::Deny });
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
         let denied = sh(&mut s, "curl -sS -m 20 https://example.com -o /dev/null; echo rc=$?", Duration::from_secs(30));
+        // Host-internal addresses stay closed: a literal one without asking, an allowed name that
+        // resolves to one after the check.
+        sh(&mut s, "curl -sS -m 10 https://169.254.169.254/ -o /dev/null; curl -sS -m 10 https://localtest.me/ -o /dev/null", Duration::from_secs(30));
         eprintln!("--- example.com:\n{denied}");
         let npm = sh(&mut s, "cd ~/work && npm view left-pad version --no-update-notifier 2>&1 | tail -2", Duration::from_secs(60));
         eprintln!("--- npm:\n{npm}");
@@ -612,10 +615,12 @@ mod tests {
         eprintln!("--- activity: {log:#?}");
         case.delete();
         assert!(denied.contains("rc=") && !denied.contains("rc=0"), "example.com must be refused");
+        assert!(log.iter().any(|l| l == "169.254.169.254:443 (address on your network)"), "metadata address refused: {log:?}");
+        assert!(log.iter().any(|l| l == "localtest.me:443 (resolves to an address on your network)"), "allowed name with an internal address refused");
         assert!(npm.contains("1.3.0"), "npm reachable once allowed");
         assert!(api.contains("api=401"), "api reached with the placeholder swapped for the (fake) host key");
         assert!(sealed.contains("api=401"), "Claude still works while sealed: {sealed}");
-        assert!(no_token.contains("api=401") && log.iter().any(|l| l.contains("not connected")), "no token: a clear 401, logged: {no_token}");
+        assert!(no_token.contains("api=401"), "no token: the API's own 401 reaches the corn: {no_token}");
         assert!(env.lines().any(|l| l.trim().trim_start_matches("\u{1b}[?2004l").trim() == "0"), "the host key is not in the guest environment: {env}");
         assert_eq!(n, 1, "only the regular file comes out");
         assert!(exported, "the report reached the quarantine folder");

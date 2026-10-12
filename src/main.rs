@@ -67,6 +67,10 @@ struct Popcorn {
     rename_focus: FocusHandle,
     /// The two scroll areas of a corn page: the timeline (or review) and the airlock column.
     left_scroll: ScrollHandle,
+    /// Timeline filter: text to match, and how far back to look (seconds; 0 is all).
+    filter: String,
+    filter_focus: FocusHandle,
+    span: u64,
     right_scroll: ScrollHandle,
     should_move: bool,
     appearance: Appearance,
@@ -258,9 +262,9 @@ fn key(k: &str, on: Hsla, ink: Hsla) -> Div {
 }
 
 /// Newest first, with runs of the same event folded into one entry and a count.
-fn stacked(events: &[Event]) -> Vec<(&Event, usize)> {
+fn stacked_refs<'a>(events: &[&'a Event]) -> Vec<(&'a Event, usize)> {
     let mut out: Vec<(&Event, usize)> = Vec::new();
-    for e in events.iter().rev() {
+    for &e in events.iter().rev() {
         match out.last_mut() {
             Some((last, n)) if last.kind == e.kind && last.text == e.text => *n += 1,
             _ => out.push((e, 1)),
@@ -377,6 +381,9 @@ impl Popcorn {
             renaming: None,
             rename_focus: cx.focus_handle(),
             left_scroll: ScrollHandle::new(),
+            filter: String::new(),
+            filter_focus: cx.focus_handle(),
+            span: 0,
             right_scroll: ScrollHandle::new(),
             should_move: false,
             appearance: Appearance::load(),
@@ -620,6 +627,32 @@ impl Popcorn {
         // Names are saved at 48 characters at most; stop there while typing too.
         if let Some((_, text)) = self.renaming.as_mut() {
             *text = text.chars().take(48).collect();
+        }
+        cx.notify();
+    }
+
+    fn on_filter_key(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        cx.stop_propagation();
+        let k = &e.keystroke;
+        match k.key.as_str() {
+            "escape" => {
+                self.filter.clear();
+                window.focus(&self.focus);
+            }
+            "enter" => window.focus(&self.focus),
+            "backspace" => {
+                self.filter.pop();
+            }
+            _ if k.modifiers.secondary() && k.key == "v" => {
+                if let Some(p) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    self.filter.push_str(p.lines().next().unwrap_or(""));
+                }
+            }
+            _ => {
+                if let Some(c) = k.key_char.as_deref().filter(|c| !k.modifiers.secondary() && !c.chars().any(char::is_control)) {
+                    self.filter.push_str(c);
+                }
+            }
         }
         cx.notify();
     }
@@ -1739,14 +1772,80 @@ impl Popcorn {
         )
     }
 
-    fn timeline(&self, events: &[Event], running: bool) -> AnyElement {
+    fn timeline(&self, events: &[Event], running: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = theme();
+        let needle = self.filter.to_lowercase();
+        let since = if self.span == 0 { 0 } else { now().saturating_sub(self.span) };
+        // The verdict word counts too, so "refused" finds every refused connection.
+        let verdict = |k: Kind| match k {
+            Kind::Blocked => "refused",
+            Kind::Allowed => "allowed",
+            Kind::Claude => "claude",
+            Kind::Note => "",
+        };
+        let shown: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.at >= since && (needle.is_empty() || e.text.to_lowercase().contains(&needle) || verdict(e.kind).contains(needle.as_str())))
+            .collect();
+        let span = |label: &'static str, secs: u64| {
+            let on = self.span == secs;
+            div()
+                .id(label)
+                .px_1p5()
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .when(on, |d| d.bg(t.surface).text_color(t.fg))
+                .when(!on, |d| d.text_color(t.faint).hover(|s| s.text_color(t.fg)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.span = secs;
+                    cx.notify();
+                }))
+                .child(label)
+        };
         div()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .child(div().pb_3().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("What happened"))
+            .child(
+                div()
+                    .pb_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(div().flex_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("What happened"))
+                    .child(div().flex().gap_0p5().child(span("All", 0)).child(span("1h", 3600)).child(span("15m", 900)))
+                    .child(
+                        div()
+                            .id("filter")
+                            .track_focus(&self.filter_focus)
+                            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| this.on_filter_key(e, window, cx)))
+                            .w(px(180.))
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .rounded(px(5.))
+                            .bg(t.surface)
+                            .border_1()
+                            .border_color(gpui::transparent_black())
+                            .focus(|s| s.border_color(t.fg))
+                            .text_size(px(12.5))
+                            .cursor_text()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                window.focus(&this.filter_focus);
+                                cx.notify();
+                            }))
+                            .child(ui_icon("search").size(px(13.)).text_color(t.faint))
+                            .child(div().flex_1().min_w_0().truncate().when(self.filter.is_empty(), |d| d.text_color(t.faint)).child(if self.filter.is_empty() { "Filter".to_string() } else { self.filter.clone() })),
+                    ),
+            )
+            .when(shown.is_empty() && !events.is_empty(), |d| d.child(div().py_8().text_color(t.muted).child("Nothing matches.")))
             .when(events.is_empty(), |d| {
                 d.child(
                     div()
@@ -1757,7 +1856,7 @@ impl Popcorn {
                 )
             })
             // The same event in a row shows once, with a count: Claude Code makes many identical calls.
-            .children(stacked(events).into_iter().take(300).map(|(e, n)| {
+            .children(stacked_refs(&shown).into_iter().take(300).map(|(e, n)| {
                 let (verdict, color): (&str, Hsla) = match e.kind {
                     Kind::Blocked => ("Refused", t.bad),
                     Kind::Allowed => ("Allowed", t.ok),
@@ -1832,29 +1931,33 @@ impl Popcorn {
                 .child(ui_icon("unplug").size(px(13.)).text_color(t.bad))
                 .into_any_element()
         });
+        let network = |m: Mode, label: &'static str| {
+            let on = c.mode == m;
+            div()
+                .id(label)
+                .h(px(28.))
+                .px_3()
+                .flex()
+                .items_center()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .when(on, |d| d.bg(t.bg).font_weight(FontWeight::MEDIUM).border_1().border_color(t.seam))
+                .when(!on, |d| d.text_color(t.muted).hover(|s| s.text_color(t.fg)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(c) = this.case() {
+                        c.set_mode(m);
+                    }
+                    cx.notify();
+                }))
+                .child(label)
+        };
         div()
             .flex()
             .flex_col()
-            .child(div().pb_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The airlock"))
-            .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("All traffic between this computer and the corn goes through here."))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(lane_with(
-                        "claude-code",
-                        t.muted,
-                        "Claude",
-                        unplugged,
-                        if self.has_key { "Claude Code connects to Anthropic. Popcorn adds your token outside the corn." } else { "Not connected. Click the red icon to connect." },
-                        x.claude,
-                        t.fg,
-                    ))
-                    .child(lane("network", "Network", if sealed { "Popcorn refuses and records each connection." } else { "Each new host waits for your approval." }, x.allowed + x.refused, if x.refused > 0 { t.bad } else { t.ok }))
-                    .child(lane("upload", "Files in", "Files that you drop or copy in go to ~/inbox.", x.files_in, t.fg))
-                    .child(lane("folder-lock", "Files out", "Only files that you export from ~/outbox. They cannot run.", x.files_out, t.fg)),
-            )
-            .child(div().pt_6().pb_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Shared folder"))
+            .child(div().pb_2().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Network"))
+            .child(div().pb_8().flex().child(div().p(px(2.)).flex().gap_0p5().rounded(px(7.)).bg(t.surface).child(network(Mode::Ask, "Ask before connecting")).child(network(Mode::Sealed, "Sealed"))))
+            .child(div().pb_2().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Shared folder"))
             .child(match share::get(&c.dir) {
                 None => div()
                     .flex()
@@ -1908,6 +2011,25 @@ impl Popcorn {
                         .into_any_element()
                 }
             })
+            .child(div().pt_8().pb_1().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("The airlock"))
+            .child(div().pb_3().text_size(px(13.)).text_color(t.muted).child("All traffic between this computer and the corn goes through here."))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(lane_with(
+                        "claude-code",
+                        t.muted,
+                        "Claude",
+                        unplugged,
+                        if self.has_key { "Claude Code connects to Anthropic. Popcorn adds your token outside the corn." } else { "Not connected. Click the red icon to connect." },
+                        x.claude,
+                        t.fg,
+                    ))
+                    .child(lane("network", "Network", if sealed { "Popcorn refuses and records each connection." } else { "Each new host waits for your approval." }, x.allowed + x.refused, if x.refused > 0 { t.bad } else { t.ok }))
+                    .child(lane("upload", "Files in", "Files that you drop or copy in go to ~/inbox.", x.files_in, t.fg))
+                    .child(lane("folder-lock", "Files out", "Only files that you export from ~/outbox. They cannot run.", x.files_out, t.fg)),
+            )
             .child(div().pt_6().pb_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Always allowed"))
             .when(mine.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("Hosts that you always allow show here.")))
             .children(mine.into_iter().enumerate().map(|(i, h)| {
@@ -1935,7 +2057,6 @@ impl Popcorn {
         let Some(case) = self.cases.get_mut(self.selected) else { return self.empty(cx) };
         let running = case.running();
         let started = case.started;
-        let mode = case.mode;
         let name = case.name.clone();
         let events: Vec<Event> = case.log.lock().unwrap().clone();
         let x = crossings(&events);
@@ -1943,30 +2064,9 @@ impl Popcorn {
         let (left, right) = (self.left_scroll.clone(), self.right_scroll.clone());
         let timeline = match self.changes_view(cx) {
             Some(changes) => changes,
-            None => self.timeline(&events, running),
+            None => self.timeline(&events, running, cx),
         };
 
-        let network = |m: Mode, label: &'static str| {
-            let on = mode == m;
-            div()
-                .id(label)
-                .h(px(28.))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded(px(5.))
-                .cursor_pointer()
-                .text_size(px(13.))
-                .when(on, |d| d.bg(t.bg).font_weight(FontWeight::MEDIUM).border_1().border_color(t.seam))
-                .when(!on, |d| d.text_color(t.muted).hover(|s| s.text_color(t.fg)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(c) = this.case() {
-                        c.set_mode(m);
-                    }
-                    cx.notify();
-                }))
-                .child(label)
-        };
 
         let header = div()
             .px_8()
@@ -2064,17 +2164,6 @@ impl Popcorn {
                                         _ => "Stopped. Popcorn keeps the disk until you delete the corn.".into(),
                                     }),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_size(px(13.))
-                                    .text_color(t.muted)
-                                    .child("Network")
-                                    .child(div().p(px(2.)).flex().gap_0p5().rounded(px(7.)).bg(t.surface).child(network(Mode::Ask, "Ask before connecting")).child(network(Mode::Sealed, "Sealed"))),
-                            )
-
                     ),
             )
             .when(running, |d| {

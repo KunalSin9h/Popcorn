@@ -32,6 +32,7 @@ kernel. It starts in about one second.
 | A corn has its own kernel | Each corn is a separate virtual machine, not a container. A kernel exploit stays inside the corn. |
 | A corn has no network card | Its only link is a private channel to Popcorn. It has no route to your network or the internet. |
 | You approve each new host | Popcorn holds each new connection and asks you. If you do not answer in 90 seconds, Popcorn refuses it. |
+| A corn cannot reach your network | Popcorn refuses addresses on your computer or local network (loopback, private, link-local), even for a host you allowed, and connects only to the addresses it checked. |
 | Your Claude token stays outside | Claude Code in the corn has only a fake token. Popcorn adds your real token to requests to `api.anthropic.com`. |
 | A corn cannot see your files | No folder from your computer is connected to a corn. A corn has only its own Linux system and its own disk. |
 | Files come out only when you export them | A corn cannot send files to your computer. Exported files are plain copies. |
@@ -42,6 +43,7 @@ kernel. It starts in about one second.
 
 - A hypervisor escape is rare, but possible. Firecracker runs as your user, without its jailer.
 - If you allow a host, the corn can send data to that host.
+- Inside a corn, your account has root. The corn is the sandbox, not the account.
 - Keep your kernel and Firecracker up to date.
 
 ## Architecture

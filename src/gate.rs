@@ -4,7 +4,7 @@
 use crate::sandbox::Mode;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -190,7 +190,7 @@ pub fn credential_hint() -> Option<String> {
     Some(format!("{kind} {}…", c.secret.chars().take(14).collect::<String>()))
 }
 
-/// Delete the saved token. Corns lose Claude at once; their next request gets "not connected".
+/// Delete the saved token. Corns lose Claude at once; their next request gets the API's own 401.
 pub fn remove_credential() -> Result<(), String> {
     match fs::remove_file(key_file()) {
         Ok(()) => Ok(()),
@@ -217,29 +217,55 @@ pub fn port_path(sock: &Path, port: u32) -> PathBuf {
     PathBuf::from(format!("{}_{port}", sock.display()))
 }
 
+/// Most connections a corn may hold open on each port. More are closed at once, so a hostile
+/// corn cannot use up the host's threads or memory.
+const MAX_CONNS: usize = 64;
+
+/// Counts a connection while it lives.
+struct Slot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Slot {
+    fn take(count: &Arc<std::sync::atomic::AtomicUsize>) -> Option<Slot> {
+        use std::sync::atomic::Ordering;
+        (count.fetch_add(1, Ordering::SeqCst) < MAX_CONNS).then(|| Slot(count.clone())).or_else(|| {
+            count.fetch_sub(1, Ordering::SeqCst);
+            None
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A request head must arrive within this time.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn serve(sock: &Path, policy: Arc<Policy>, log: Log, dir: PathBuf) -> Result<(), String> {
     let egress = UnixListener::bind(port_path(sock, 1080)).map_err(|e| e.to_string())?;
     let api = UnixListener::bind(port_path(sock, 1081)).map_err(|e| e.to_string())?;
     // ponytail: listeners live until the process exits; a restarted case binds fresh sockets.
     let (l2, d2) = (log.clone(), dir.clone());
     std::thread::spawn(move || {
+        let count = Arc::default();
         for c in egress.incoming().flatten() {
+            let Some(slot) = Slot::take(&count) else { continue };
             let (policy, log, dir) = (policy.clone(), log.clone(), dir.clone());
-            std::thread::spawn(move || egress_conn(c, &policy, &log, &dir));
+            std::thread::spawn(move || {
+                let _slot = slot;
+                egress_conn(c, &policy, &log, &dir)
+            });
         }
     });
     std::thread::spawn(move || {
+        let count = Arc::default();
         for c in api.incoming().flatten() {
+            let Some(slot) = Slot::take(&count) else { continue };
             let (log, dir) = (l2.clone(), d2.clone());
             std::thread::spawn(move || {
-                if credential().is_none() {
-                    // Tell Claude Code why, in the API's own error format, instead of a dropped connection.
-                    record(&log, &dir, Event { at: now(), kind: Kind::Blocked, text: "Claude API (not connected)".into() });
-                    let body = r#"{"type":"error","error":{"type":"authentication_error","message":"Claude is not connected. In Popcorn, click Connect next to Claude."}}"#;
-                    let mut c = c;
-                    let _ = write!(c, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                    return;
-                }
+                let _slot = slot;
                 if let Err(e) = api_conn(c, &log, &dir) {
                     record(&log, &dir, Event { at: now(), kind: Kind::Blocked, text: format!("Claude API error: {e}") });
                 }
@@ -264,17 +290,54 @@ fn read_head(r: &mut BufReader<UnixStream>) -> Option<Vec<String>> {
     }
 }
 
+/// True for addresses on the public internet. Loopback, private, link-local (the cloud metadata
+/// service at 169.254.169.254), shared, multicast and other special ranges are on your side of
+/// the gate: a corn never reaches them, even for a host you allowed.
+pub fn public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => public(IpAddr::V4(v4)),
+            None => !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || v6.is_unique_local() || v6.is_unicast_link_local()),
+        },
+    }
+}
+
 fn egress_conn(c: UnixStream, policy: &Policy, log: &Log, dir: &Path) {
+    c.set_read_timeout(Some(HEAD_TIMEOUT)).ok();
     let mut r = BufReader::new(c.try_clone().unwrap());
     let Some(head) = read_head(&mut r) else { return };
+    // The tunnel may sit idle for a long time; only the head has a deadline.
+    c.set_read_timeout(None).ok();
     let mut w = c;
     let first = head.first().cloned().unwrap_or_default();
     let mut parts = first.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let target = target.to_ascii_lowercase();
-    let host = target.rsplit_once(':').map_or(target.as_str(), |(h, _)| h).to_string();
+    let host = target.rsplit_once(':').map_or(target.as_str(), |(h, _)| h).trim_matches(['[', ']']).to_string();
+    let literal_internal = host.parse::<IpAddr>().is_ok_and(|ip| !public(ip));
     // Plain-HTTP proxy requests are refused outright: they would let the guest pick any URL per request.
-    let (ok, why) = if method == "CONNECT" { policy.decide(&target) } else { (false, "plain HTTP") };
+    // An internal address is refused before you are asked. A name is resolved only after you allow
+    // it, so a name you deny is never looked up.
+    let (ok, why) = if method != "CONNECT" {
+        (false, "plain HTTP")
+    } else if literal_internal {
+        (false, "address on your network")
+    } else {
+        policy.decide(&target)
+    };
     if !ok {
         let what = if method == "CONNECT" { target.clone() } else { format!("{method} {target}") };
         record(log, dir, Event { at: now(), kind: Kind::Blocked, text: format!("{what} ({why})") });
@@ -282,7 +345,16 @@ fn egress_conn(c: UnixStream, policy: &Policy, log: &Log, dir: &Path) {
         return;
     }
     let port: u16 = target.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(443);
-    let Ok(up) = TcpStream::connect((host.as_str(), port)) else {
+    // Connect only to the addresses checked here, so a name cannot change to an internal address
+    // between the check and the connection (DNS rebinding).
+    let addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs().map(|a| a.collect()).unwrap_or_default();
+    let open: Vec<SocketAddr> = addrs.iter().copied().filter(|a| public(a.ip())).collect();
+    if !addrs.is_empty() && open.is_empty() {
+        record(log, dir, Event { at: now(), kind: Kind::Blocked, text: format!("{target} (resolves to an address on your network)") });
+        let _ = w.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let Ok(up) = TcpStream::connect(&open[..]) else {
         let _ = w.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
         return;
     };
@@ -313,13 +385,16 @@ fn tls() -> Arc<rustls::ClientConfig> {
 }
 
 /// One request per connection: read it, swap the placeholder credential for the real one,
-/// send it to the API over TLS, stream the answer back.
+/// send it to the API over TLS, stream the answer back. With no token on the host the request
+/// goes out without one, and Claude Code shows the API's own authentication error.
 fn api_conn(c: UnixStream, log: &Log, dir: &Path) -> Result<(), String> {
-    let cred = credential().ok_or("no credential on the host")?;
+    let cred = credential();
+    // The request must arrive in time. The answer may stream for minutes, so the timeout ends there.
+    c.set_read_timeout(Some(HEAD_TIMEOUT)).map_err(|e| e.to_string())?;
     let mut r = BufReader::new(c.try_clone().map_err(|e| e.to_string())?);
     let head = read_head(&mut r).ok_or("bad request")?;
     let request_line = head.first().cloned().unwrap_or_default();
-    let mut len = 0usize;
+    let mut len = 0u64;
     let mut out = format!("{request_line}\r\nHost: {API}\r\nConnection: close\r\n");
     for h in &head[1..] {
         let name = h.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
@@ -336,20 +411,27 @@ fn api_conn(c: UnixStream, log: &Log, dir: &Path) -> Result<(), String> {
             }
         }
     }
-    match cred.kind {
-        Auth::Key => out.push_str(&format!("x-api-key: {}\r\n", cred.secret)),
-        Auth::OAuth => out.push_str(&format!("Authorization: Bearer {}\r\n", cred.secret)),
+    match cred {
+        Some(Credential { kind: Auth::Key, secret }) => out.push_str(&format!("x-api-key: {secret}\r\n")),
+        Some(Credential { kind: Auth::OAuth, secret }) => out.push_str(&format!("Authorization: Bearer {secret}\r\n")),
+        None => {}
     }
     out.push_str("\r\n");
-    let mut body = vec![0; len.min(64 << 20)];
-    r.read_exact(&mut body).map_err(|e| e.to_string())?;
+    if len > 64 << 20 {
+        return Err("request too large".into());
+    }
 
     let conn = rustls::ClientConnection::new(tls(), API.try_into().unwrap()).map_err(|e| e.to_string())?;
     let sock = TcpStream::connect((API, 443)).map_err(|e| e.to_string())?;
     let mut s = rustls::StreamOwned::new(conn, sock);
     s.write_all(out.as_bytes()).map_err(|e| e.to_string())?;
-    s.write_all(&body).map_err(|e| e.to_string())?;
+    // Stream the body through; never hold it whole in memory.
+    let sent = std::io::copy(&mut (&mut r).take(len), &mut s).map_err(|e| e.to_string())?;
+    if sent != len {
+        return Err("request body cut short".into());
+    }
     s.flush().map_err(|e| e.to_string())?;
+    c.set_read_timeout(None).ok();
     let path = request_line.split_whitespace().nth(1).unwrap_or("").split('?').next().unwrap_or("").to_string();
     record(log, dir, Event { at: now(), kind: Kind::Claude, text: path });
     let mut guest = c;
@@ -432,6 +514,16 @@ pub fn import(r: impl Read, dest: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_addresses_are_not_public() {
+        for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255", "::1", "fe80::1", "fd00::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254"] {
+            assert!(!public(ip.parse().unwrap()), "{ip} must be refused");
+        }
+        for ip in ["1.1.1.1", "104.18.0.1", "2606:4700::1111"] {
+            assert!(public(ip.parse().unwrap()), "{ip} must be reachable");
+        }
+    }
 
     /// One tar entry: name, typeflag, contents.
     fn entry(name: &str, kind: u8, body: &[u8]) -> Vec<u8> {

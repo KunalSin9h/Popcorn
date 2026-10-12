@@ -130,7 +130,7 @@ The corn has no network card. All traffic uses vsock. The host CID is 2.
 
 | Port | Direction | Use |
 |---|---|---|
-| 1080 | corn to host | HTTP CONNECT proxy through the network gate |
+| 1080 | corn to host | HTTP CONNECT proxy through the network gate. Public addresses only; 64 connections at a time. |
 | 1081 | corn to host | Claude API. The host adds the token and opens TLS. |
 | 1024 | host to corn | Login shell for the terminal |
 | 1025 | host to corn | Files in, as a tar stream, to `~/inbox` |
@@ -164,8 +164,9 @@ rm -rf $H
 
 | Test | Checks |
 |---|---|
-| `case_boots_isolated_and_gated` | No network card. Denied host refused. Allowed host works. Claude proxy swaps the token, works while sealed, and returns 401 with no token. Token not in the guest. Outbox export drops links. Shared folder: secrets stay home, changes detected, only approved files written. |
+| `case_boots_isolated_and_gated` | No network card. Denied host refused. Internal addresses refused, literal or resolved. Allowed host works. Claude proxy swaps the token, works while sealed, and returns 401 with no token. Token not in the guest. Outbox export drops links. Shared folder: secrets stay home, changes detected, only approved files written. |
 | `attach_is_responsive` | Terminal echo under 150 ms, `TERM` set, prompt shows the user name. |
+| `internal_addresses_are_not_public` | Loopback, private, link-local, metadata, multicast and mapped IPv6 addresses are refused; public ones pass. |
 | `import_keeps_only_plain_files_inside_quarantine` | Tar reader drops links, devices and unsafe paths. |
 | `writes_stay_inside_the_folder` | Approved writes never leave the folder or go through a link. |
 | `refuses_home_and_secret_folders` | Home, `/`, folders above home and folders with keys are refused. |
