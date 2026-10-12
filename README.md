@@ -19,7 +19,7 @@ binaries. You and Claude Code do the work in a corn. Your files, keys and networ
 🌽 A corn is a [Firecracker](https://firecracker-microvm.github.io/) microVM with its own Linux
 kernel. It starts in about one second.
 
-- **Terminal.** Open a shell in a corn. Claude Code is installed.
+- **Terminal.** Open a shell in a corn.
 - **Network.** Each new host waits for your approval: deny, allow once or always allow.
 - **Files in.** Drop files on the window, or select them. They go to `~/inbox`.
 - **Files out.** Export files from `~/outbox`. Popcorn saves them as copies that cannot run.
@@ -34,7 +34,7 @@ kernel. It starts in about one second.
 | You approve each new host | Popcorn holds each new connection and asks you. If you do not answer in 90 seconds, Popcorn refuses it. |
 | Your Claude token stays outside | Claude Code in the corn has only a fake token. Popcorn adds your real token to requests to `api.anthropic.com`. |
 | A corn cannot see your files | No folder from your computer is connected to a corn. A corn has only its own Linux system and its own disk. |
-| Files come out only when you export them | A corn cannot send files to your computer. Exported files are plain copies, and they cannot run. |
+| Files come out only when you export them | A corn cannot send files to your computer. Exported files are plain copies. |
 | Your folder changes only with your approval | You review each changed file. Popcorn writes only the files that you approve, and only inside that folder. |
 | Your keys stay outside | Popcorn does not share your home folder, or a folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It also leaves out `.git` and ignored files. |
 
