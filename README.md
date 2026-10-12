@@ -60,7 +60,7 @@ kernel. It starts in about one second.
 flowchart LR
   subgraph host["Your computer"]
     app["Popcorn app"]
-    gate["Network gate<br/>ask, allow, refuse"]
+    gate["Network gate<br/>ask, allow, refuse<br/>public addresses only"]
     proxy["Claude proxy<br/>adds your token"]
     token[("Claude token")]
     files["Files<br/>inbox, outbox, review"]
@@ -90,12 +90,21 @@ sequenceDiagram
   participant Y as You
   participant H as Remote host
   C->>G: CONNECT example.com:443
-  G->>Y: Show the yellow band
-  alt Deny, or no answer in 90 s
-    G-->>C: 403 Forbidden
-  else Allow once or always
-    G->>H: Open connection
-    G-->>C: 200 Connection established
+  alt An address on your network, such as 127.0.0.1
+    G-->>C: 403 Forbidden, without asking
+  else A name
+    G->>Y: Show the yellow band
+    alt Deny, or no answer in 90 s
+      G-->>C: 403 Forbidden
+    else Allow once or always
+      G->>G: Resolve the name. Keep public addresses only.
+      alt No public address
+        G-->>C: 403 Forbidden
+      else
+        G->>H: Connect to a checked address
+        G-->>C: 200 Connection established
+      end
+    end
   end
 ```
 
