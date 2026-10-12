@@ -3,8 +3,8 @@
 FROM node:22-bookworm
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      socat iproute2 sudo procps less vim-tiny tree ripgrep jq ca-certificates git curl wget \
-      python3-pip python3-venv sqlite3 openssl htop \
+      socat iproute2 sudo procps less vim nano tree ripgrep jq ca-certificates git curl wget \
+      python3-pip python3-venv pipx sqlite3 openssl htop build-essential \
       `# network: most of these only reach localhost, a corn has no network card` \
       iputils-ping dnsutils netcat-openbsd net-tools lsof tcpdump \
       `# tracing and reverse engineering` \
@@ -14,6 +14,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+
+# uv: fast Python package manager, a single static binary.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
 
 # The analyst account. Passwordless sudo: the VM is disposable and has nothing of yours in it.
 RUN userdel -r node 2>/dev/null || true \
