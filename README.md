@@ -41,9 +41,7 @@ kernel. It starts in about one second. When you finish, you delete it.
 ### Limits
 
 - A hypervisor escape is rare, but possible. Firecracker runs as your user, without its jailer.
-- A host that you allow can receive data from the corn.
-- Code in a corn can use your Claude quota. It cannot read your token.
-- Malware can detect a virtual machine and hide. A quiet corn is not proof of safety.
+- If you allow a host, the corn can send data to that host.
 - Keep your kernel and Firecracker up to date.
 
 ## Architecture
