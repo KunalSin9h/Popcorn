@@ -1,6 +1,10 @@
-<h1 align="center">🍿<br>Popcorn</h1>
+<p align="center">
+  <img src="https://github.githubassets.com/images/icons/emoji/unicode/1f37f.png" width="88" alt="🍿">
+  &nbsp;&nbsp;
+  <img src="https://github.githubassets.com/images/icons/emoji/unicode/1f33d.png" width="88" alt="🌽">
+</p>
 
-<p align="center">🌽 🌽 🌽</p>
+<h1 align="center">Popcorn</h1>
 
 <p align="center">
   A workbench for risky work.<br>
