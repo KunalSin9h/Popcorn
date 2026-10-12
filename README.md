@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/KunalSin9h/popcorn/releases/latest"><img src="https://img.shields.io/badge/Download-for%20Linux-1C2124?style=for-the-badge&logo=linux&logoColor=white" alt="Download for Linux"></a>
+  <a href="https://github.com/KunalSin9h/popcorn/releases/latest"><img src="https://img.shields.io/badge/Download-for%20Linux-F0BE2C?style=for-the-badge&labelColor=B23A2E&logo=linux&logoColor=white" alt="Download for Linux"></a>
 </p>
 
 ---
