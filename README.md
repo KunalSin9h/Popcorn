@@ -17,11 +17,11 @@
 
 ## What it does
 
-Popcorn is a desktop app for Linux. Use it for untrusted code, suspicious packages and unknown
-binaries. You and Claude Code do the work in a corn. Your files, keys and network stay outside.
+Open untrusted code, suspicious packages and unknown binaries in a corn. You and Claude Code
+work inside it. Your files, Claude token, keys and network stay outside.
 
 🌽 A corn is a [Firecracker](https://firecracker-microvm.github.io/) microVM with its own Linux
-kernel. It starts in about one second.
+kernel. It boots in about one second.
 
 <p align="center">
   <img src="assets/screenshots/ask.png" width="860" alt="A corn asks before it connects to github.com">
@@ -29,11 +29,11 @@ kernel. It starts in about one second.
 
 <img src="assets/screenshots/review.png" width="340" align="right" alt="Review each changed file before it is written back">
 
-- **Terminal.** Open a shell in a corn.
-- **Network.** Each new host waits for your approval: deny, allow once or always allow.
-- **Files in.** Drop files on the window, or select them. They go to `~/inbox`.
-- **Files out.** Export files from `~/outbox`. Popcorn saves them as copies that cannot run.
-- **Shared folder.** The corn gets a copy of a folder. Popcorn writes back only the changes that you approve.
+- **Terminal:** a shell in the corn.
+- **Network:** you deny, allow once or always allow each new host.
+- **Files in:** drop or pick files. They land in `~/inbox`.
+- **Files out:** export from `~/outbox` as copies that cannot run.
+- **Shared folder:** the corn works on a copy. You approve each change before Popcorn writes it back.
 
 <br clear="right">
 
@@ -41,21 +41,20 @@ kernel. It starts in about one second.
 
 | Guarantee | How |
 |---|---|
-| A corn has its own kernel | Each corn is a separate virtual machine, not a container. A kernel exploit stays inside the corn. |
-| A corn has no network card | Its only link is a private channel to Popcorn. It has no route to your network or the internet. |
-| You approve each new host | Popcorn holds each new connection and asks you. If you do not answer in 90 seconds, Popcorn refuses it. |
-| A corn cannot reach your network | Popcorn refuses addresses on your computer or local network (loopback, private, link-local), even for a host you allowed, and connects only to the addresses it checked. |
-| Your Claude token stays outside | Claude Code in the corn has only a fake token. Popcorn adds your real token to requests to `api.anthropic.com`. |
-| A corn cannot see your files | No folder from your computer is connected to a corn. A corn has only its own Linux system and its own disk. |
-| Files come out only when you export them | A corn cannot send files to your computer. Exported files are plain copies. |
-| Your folder changes only with your approval | You review each changed file. Popcorn writes only the files that you approve, and only inside that folder. |
-| Your keys stay outside | Popcorn does not share your home folder, or a folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It also leaves out `.git` and ignored files. |
+| Own kernel | Each corn is a separate VM. A kernel exploit stays inside. |
+| No network card | The corn talks only to Popcorn, over a private channel. |
+| You approve each new host | Popcorn holds the connection and asks. No answer in 90 seconds means no. |
+| No access to your network | Popcorn refuses loopback, private and link-local addresses, even for allowed hosts. It connects only to addresses it checked. |
+| Claude token stays outside | Claude Code in the corn gets a fake token. Popcorn adds the real one to requests to `api.anthropic.com`. |
+| No access to your files | Popcorn mounts no host folder. The corn has its own system and disk. |
+| Files leave only on export | Exports are plain copies. |
+| Folder changes need approval | Popcorn writes only the files you approve, and only inside that folder. |
+| Keys stay outside | Popcorn refuses to share your home folder or any folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It skips `.git` and ignored files. |
 
 ### Limits
 
-- A hypervisor escape is rare, but possible. Firecracker runs as your user, without its jailer.
-- If you allow a host, the corn can send data to that host.
-- Inside a corn, your account has root. The corn is the sandbox, not the account.
+- A hypervisor escape is rare but possible. Firecracker runs as your user, without its jailer.
+- An allowed host can receive data from the corn.
 - Keep your kernel and Firecracker up to date.
 
 ## Architecture
@@ -85,40 +84,11 @@ flowchart LR
   shell --- disk
 ```
 
-A new connection waits for you:
-
-```mermaid
-sequenceDiagram
-  participant C as Code in corn
-  participant G as Network gate
-  participant Y as You
-  participant H as Remote host
-  C->>G: CONNECT example.com:443
-  alt An address on your network, such as 127.0.0.1
-    G-->>C: 403 Forbidden, without asking
-  else A name
-    G->>Y: Show the yellow band
-    alt Deny, or no answer in 90 s
-      G-->>C: 403 Forbidden
-    else Allow once or always
-      G->>G: Resolve the name. Keep public addresses only.
-      alt No public address
-        G-->>C: 403 Forbidden
-      else
-        G->>H: Connect to a checked address
-        G-->>C: 200 Connection established
-      end
-    end
-  end
-```
-
 ## Quick start
 
 <a href="https://github.com/KunalSin9h/popcorn/releases/latest"><img src="https://img.shields.io/badge/Download-for%20Linux-F0BE2C?style=for-the-badge&labelColor=B23A2E&logo=linux&logoColor=white" alt="Download for Linux"></a>
 
-
-
-Popcorn runs on Linux with KVM. Read [docs/DEV.md](docs/DEV.md) for system packages.
+You need Linux with KVM. [docs/DEV.md](docs/DEV.md) lists the system packages.
 
 ```sh
 ./scripts/fetch-firecracker.sh   # Firecracker and a guest kernel, one time
@@ -126,8 +96,8 @@ Popcorn runs on Linux with KVM. Read [docs/DEV.md](docs/DEV.md) for system packa
 cargo run --release
 ```
 
-Popcorn then asks for three items: your name, the image, and a Claude token (optional). Get a token with
-`claude setup-token`.
+On first run, Popcorn asks for your name, the image and an optional Claude token. Get a token
+with `claude setup-token`.
 
 ## Documentation
 
