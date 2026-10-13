@@ -1,0 +1,70 @@
+# Push a tag like v0.1.0 to build and publish a release: the workbench image, an AppImage and a .deb.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if this tag already has a release
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check that the tag matches Cargo.toml
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, Cargo.toml $v"; exit 1; }
+
+      - name: System packages
+        if: steps.exists.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang pkg-config cmake zstd e2fsprogs \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
+            libfontconfig1-dev libfreetype-dev libx11-dev libxcb1-dev libssl-dev libzstd-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.exists.outputs.skip != 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.exists.outputs.skip != 'true'
+
+      - name: Firecracker and kernel
+        if: steps.exists.outputs.skip != 'true'
+        run: ./scripts/fetch-firecracker.sh
+
+      - name: Workbench image
+        if: steps.exists.outputs.skip != 'true'
+        run: ./scripts/release-image.sh
+
+      - name: Unit tests
+        if: steps.exists.outputs.skip != 'true'
+        run: cargo test --release
+
+      - name: AppImage and .deb
+        if: steps.exists.outputs.skip != 'true'
+        run: ./scripts/package.sh all
+
+      - name: Publish
+        if: steps.exists.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum Popcorn-*.AppImage popcorn_*.deb > SHA256SUMS
+          cat golden-*.ext4.zst.sha256 >> SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --title "Popcorn $GITHUB_REF_NAME" --generate-notes \
+            Popcorn-*.AppImage popcorn_*.deb golden-*.ext4.zst SHA256SUMS
