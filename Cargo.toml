@@ -2,6 +2,7 @@
 name = "popcorn"
 version = "0.2.0"
 edition = "2024"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["wayland", "x11"] }

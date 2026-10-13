@@ -102,3 +102,8 @@ with `claude setup-token`.
 ## Documentation
 
 - [docs/DEV.md](docs/DEV.md): stack, build, tests and workflow.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE.md). Read the code, build it, and use it for personal
+testing, hobby work or study, free.
