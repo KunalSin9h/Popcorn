@@ -420,6 +420,87 @@ pub fn connect(sock: &Path, port: u32) -> Result<UnixStream, String> {
     Ok(s)
 }
 
+/// Drops clipboard escapes from the corn's output: OSC 52 and kitty's OSC 5522. Through them,
+/// code in a corn could set your clipboard (a command you later paste on your computer) or read
+/// it. All other output passes unchanged. A sequence can arrive in pieces, so state stays between
+/// reads. Both the `ESC ]` and the UTF-8 C1 form start a sequence; BEL, ST, CAN or SUB end it.
+// ponytail: blocks the clipboard sequences only; other OSCs (title, links, colors) pass.
+#[derive(Default)]
+pub struct NoClipboard {
+    state: Clip,
+    held: Vec<u8>,
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum Clip {
+    #[default]
+    Text,
+    Esc,
+    C2,
+    Number,
+    Drop,
+    DropEsc,
+    DropC2,
+}
+
+impl NoClipboard {
+    pub fn filter(&mut self, input: &[u8], out: &mut Vec<u8>) {
+        for &b in input {
+            self.byte(b, out);
+        }
+    }
+
+    fn byte(&mut self, b: u8, out: &mut Vec<u8>) {
+        match self.state {
+            Clip::Text if b == 0x1b || b == 0xc2 => {
+                self.held.push(b);
+                self.state = if b == 0x1b { Clip::Esc } else { Clip::C2 };
+            }
+            Clip::Text => out.push(b),
+            Clip::Esc | Clip::C2 if (self.state, b) == (Clip::Esc, b']') || (self.state, b) == (Clip::C2, 0x9d) => {
+                self.held.push(b);
+                self.state = Clip::Number;
+            }
+            Clip::Esc | Clip::C2 => {
+                out.append(&mut self.held);
+                self.state = Clip::Text;
+                self.byte(b, out);
+            }
+            // Leading zeros count: terminals read "052" as 52. A very long number is dropped too.
+            Clip::Number if b.is_ascii_digit() && self.held.len() < 40 => self.held.push(b),
+            Clip::Number => {
+                let n = std::str::from_utf8(&self.held[2..]).unwrap_or("").trim_start_matches('0');
+                if n == "52" || n == "5522" || b.is_ascii_digit() {
+                    self.held.clear();
+                    self.state = Clip::Drop;
+                } else {
+                    out.append(&mut self.held);
+                    self.state = Clip::Text;
+                }
+                self.byte(b, out);
+            }
+            Clip::Drop => match b {
+                0x07 | 0x18 | 0x1a => self.state = Clip::Text,
+                0x1b => self.state = Clip::DropEsc,
+                0xc2 => self.state = Clip::DropC2,
+                _ => {}
+            },
+            // ESC \ is ST and ends the sequence. Any other ESC also ends it and starts a new escape.
+            Clip::DropEsc if b == b'\\' => self.state = Clip::Text,
+            Clip::DropEsc => {
+                self.held.push(0x1b);
+                self.state = Clip::Esc;
+                self.byte(b, out);
+            }
+            Clip::DropC2 if b == 0x9c => self.state = Clip::Text,
+            Clip::DropC2 => {
+                self.state = Clip::Drop;
+                self.byte(b, out);
+            }
+        }
+    }
+}
+
 /// `popcorn attach <case dir>`: bridge this terminal to the shell inside the case.
 pub fn attach(dir: &Path) -> ! {
     let sock = dir.join("v.sock");
@@ -484,8 +565,11 @@ pub fn attach(dir: &Path) -> ! {
     // Unbuffered both ways: every keystroke's echo reaches the screen at once.
     let mut out = std::io::stdout().lock();
     let mut buf = [0u8; 8192];
+    let (mut guard, mut clean) = (NoClipboard::default(), Vec::with_capacity(8192));
     while let Ok(n) = s.read(&mut buf) {
-        if n == 0 || out.write_all(&buf[..n]).and_then(|_| out.flush()).is_err() {
+        clean.clear();
+        guard.filter(&buf[..n], &mut clean);
+        if n == 0 || out.write_all(&clean).and_then(|_| out.flush()).is_err() {
             break;
         }
     }
@@ -506,6 +590,31 @@ mod tests {
         assert_eq!(numbered("report.pdf", 2), "report (2).pdf");
         assert_eq!(numbered("pkg", 3), "pkg (3)");
         assert_eq!(numbered(".env", 2), ".env (2)");
+    }
+
+    #[test]
+    fn terminal_drops_clipboard_escapes() {
+        let run = |chunks: &[&[u8]]| {
+            let (mut g, mut out) = (NoClipboard::default(), Vec::new());
+            chunks.iter().for_each(|c| g.filter(c, &mut out));
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        let whole = |s: &str| run(&[s.as_bytes()]);
+        // Clipboard writes and reads, every form, are dropped; the text around them stays.
+        assert_eq!(whole("a\x1b]52;c;Y3VybCBldmlsIHwgc2g=\x07b"), "ab");
+        assert_eq!(whole("a\x1b]52;c;?\x1b\\b"), "ab");
+        assert_eq!(whole("a\u{9d}52;c;eA==\u{9c}b"), "ab");
+        assert_eq!(whole("a\x1b]052;c;eA==\x07b"), "ab");
+        assert_eq!(whole("a\x1b]5522;type=write\x07b"), "ab");
+        // An ESC cuts the sequence short; the escape it starts passes.
+        assert_eq!(whole("a\x1b]52;c;eA==\x1b[31mb"), "a\x1b[31mb");
+        // A sequence split into single bytes is dropped too.
+        let bytes = "a\x1b]52;c;eA==\x07b".as_bytes();
+        assert_eq!(run(&bytes.chunks(1).collect::<Vec<_>>()), "ab");
+        // Everything else passes unchanged: colors, titles, links, UTF-8 (© is C2 A9).
+        for ok in ["\x1b[1;32mgreen\x1b[0m", "\x1b]0;title\x07", "\x1b]8;;https://x.y\x1b\\link\x1b]8;;\x1b\\", "\x1b]11;?\x07", "© ±", "\x1b]5;x\x07"] {
+            assert_eq!(whole(ok), ok);
+        }
     }
 
     #[test]

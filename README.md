@@ -48,6 +48,7 @@ kernel. It boots in about one second.
 | Claude token stays outside | Claude Code in the corn gets a fake token. Popcorn adds the real one to requests to `api.anthropic.com`. |
 | No access to your files | Popcorn mounts no host folder. The corn has its own system and disk. |
 | Files leave only on export | Exports are plain copies. |
+| Clipboard stays yours | The terminal drops clipboard escapes (OSC 52) from the corn, so code in a corn cannot set or read your clipboard. |
 | Folder changes need approval | Popcorn writes only the files you approve, and only inside that folder. |
 | Keys stay outside | Popcorn refuses to share your home folder or any folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It skips `.git` and ignored files. |
 
@@ -55,6 +56,7 @@ kernel. It boots in about one second.
 
 - A hypervisor escape is rare but possible. Firecracker runs as your user, without its jailer.
 - An allowed host can receive data from the corn.
+- The terminal shows output from the corn. A bug in your terminal app is outside Popcorn.
 - Keep your kernel and Firecracker up to date.
 
 ## Architecture

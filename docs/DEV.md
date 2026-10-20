@@ -171,6 +171,7 @@ rm -rf $H
 | `import_keeps_only_plain_files_inside_quarantine` | Tar reader drops links, devices and unsafe paths. |
 | `writes_stay_inside_the_folder` | Approved writes never leave the folder or go through a link. |
 | `refuses_home_and_secret_folders` | Home, `/`, folders above home and folders with keys are refused. |
+| `terminal_drops_clipboard_escapes` | Clipboard escapes from the corn never reach your terminal, in any form or split; other output passes. |
 | `names_become_safe_account_names` | Typed names become safe Linux account names. |
 
 ## Debugging
