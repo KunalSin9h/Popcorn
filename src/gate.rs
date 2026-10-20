@@ -40,28 +40,55 @@ impl Ask {
 /// What a case may reach. Shared by the gate threads and the UI.
 pub struct Policy {
     pub mode: Mutex<Mode>,
-    /// Hosts you chose "Always allow" for, saved in the case's `allow` file.
-    pub allow: Mutex<BTreeSet<String>>,
     pub asks: Mutex<Vec<Ask>>,
-    dir: PathBuf,
+}
+
+/// Hosts you chose "Always allow" for. One list for every corn, saved in `home/allow`, so a
+/// host you allow in one corn is allowed in all of them, running ones too.
+pub fn allowed() -> &'static Mutex<BTreeSet<String>> {
+    static ALLOW: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    ALLOW.get_or_init(|| {
+        let read = |p: &Path| fs::read_to_string(p).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+        let mut a: BTreeSet<String> = read(&crate::sandbox::home().join("allow")).into_iter().collect();
+        // Older versions kept one list in each corn. Merge them into this one, once.
+        for corn in fs::read_dir(crate::sandbox::corns()).into_iter().flatten().flatten() {
+            let f = corn.path().join("allow");
+            if f.exists() {
+                a.extend(read(&f));
+                save_allowed(&a);
+                fs::remove_file(f).ok();
+            }
+        }
+        Mutex::new(a)
+    })
+}
+
+fn save_allowed(a: &BTreeSet<String>) {
+    fs::create_dir_all(crate::sandbox::home()).ok();
+    fs::write(crate::sandbox::home().join("allow"), a.iter().cloned().collect::<Vec<_>>().join("\n")).ok();
+}
+
+pub fn forget(host: &str) {
+    let mut a = allowed().lock().unwrap();
+    a.remove(host);
+    save_allowed(&a);
+}
+
+pub fn forget_all() {
+    let mut a = allowed().lock().unwrap();
+    a.clear();
+    save_allowed(&a);
+}
+
+fn remember(host: &str) {
+    let mut a = allowed().lock().unwrap();
+    a.insert(host.to_string());
+    save_allowed(&a);
 }
 
 impl Policy {
-    pub fn load(dir: &Path, mode: Mode) -> Arc<Policy> {
-        let allow = fs::read_to_string(dir.join("allow")).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-        Arc::new(Policy { mode: Mutex::new(mode), allow: Mutex::new(allow), asks: Mutex::new(Vec::new()), dir: dir.to_path_buf() })
-    }
-
-    pub fn forget(&self, host: &str) {
-        let mut a = self.allow.lock().unwrap();
-        a.remove(host);
-        fs::write(self.dir.join("allow"), a.iter().cloned().collect::<Vec<_>>().join("\n")).ok();
-    }
-
-    fn remember(&self, host: &str) {
-        let mut a = self.allow.lock().unwrap();
-        a.insert(host.to_string());
-        fs::write(self.dir.join("allow"), a.iter().cloned().collect::<Vec<_>>().join("\n")).ok();
+    pub fn new(mode: Mode) -> Arc<Policy> {
+        Arc::new(Policy { mode: Mutex::new(mode), asks: Mutex::new(Vec::new()) })
     }
 
     /// Decide about one connection. May block for up to ASK_TIMEOUT while you answer.
@@ -69,7 +96,7 @@ impl Policy {
         if *self.mode.lock().unwrap() == Mode::Sealed {
             return (false, "sealed");
         }
-        if self.allow.lock().unwrap().contains(target) {
+        if allowed().lock().unwrap().contains(target) {
             return (true, "");
         }
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -81,7 +108,7 @@ impl Policy {
         match answer {
             Answer::Once => (true, "allowed once"),
             Answer::Always => {
-                self.remember(target);
+                remember(target);
                 (true, "always allowed")
             }
             Answer::Deny => (false, "denied by you"),

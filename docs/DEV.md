@@ -121,7 +121,8 @@ address that does not need a login.
 | `~/.local/share/popcorn/vmlinux` | Guest kernel |
 | `~/.local/share/popcorn/images/golden-<version>.ext4` | Read-only workbench image of a release |
 | `~/.local/share/popcorn/golden.ext4` | Read-only workbench image of a development build |
-| `~/.local/share/popcorn/corns/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `allow`, `mode`, `title`, `inbox.sent`, `share`, sockets. Older versions used `cases/`; Popcorn moves it. |
+| `~/.local/share/popcorn/allow` | Hosts you always allow, one for each line. All corns use this list. |
+| `~/.local/share/popcorn/corns/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `mode`, `title`, `inbox.sent`, `share`, `terminal.lock`, sockets. Older versions used `cases/`; Popcorn moves it. |
 | `~/.config/popcorn/` | `user`, `claude-key` (mode 0600), `appearance`, `claude-skipped` |
 
 ## Vsock channels

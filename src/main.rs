@@ -56,6 +56,8 @@ struct Popcorn {
     notice: Option<(String, bool)>,
     /// The case the delete dialog is asking about.
     deleting: Option<usize>,
+    /// Close was pressed while a terminal is open; the close dialog asks first.
+    closing: bool,
     /// The shared folder waiting for a confirm before it replaces the corn's copy.
     refreshing: Option<PathBuf>,
     /// The intro page was dismissed this session.
@@ -75,6 +77,8 @@ struct Popcorn {
     should_move: bool,
     appearance: Appearance,
     _appearance_watch: Subscription,
+    /// The newest question you were notified about. Question ids only grow.
+    pinged: u64,
 }
 
 fn ui_icon(name: &str) -> Svg {
@@ -83,7 +87,7 @@ fn ui_icon(name: &str) -> Svg {
 
 /// Window button for Linux and Windows. Stops mouse-down so the title bar never starts a drag
 /// from it: on Wayland a drag hands the pointer to the compositor and the click would be lost.
-fn control(id: &'static str, icon: &'static str, area: WindowControlArea, danger: bool, action: fn(&mut Window)) -> impl IntoElement {
+fn control(id: &'static str, icon: &'static str, area: WindowControlArea, danger: bool, action: impl Fn(&mut Window, &mut App) + 'static) -> impl IntoElement {
     let t = theme();
     div()
         .id(id)
@@ -99,7 +103,7 @@ fn control(id: &'static str, icon: &'static str, area: WindowControlArea, danger
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
-            action(window);
+            action(window, cx);
         })
         .child(
             ui_icon(icon)
@@ -348,10 +352,14 @@ fn crossings(events: &[Event]) -> Crossings {
 impl Popcorn {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Repaint regularly so VM state, questions and the activity stay live.
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_millis(500)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let tick = this.update_in(cx, |this, window, cx| {
+                    this.ping_new_asks(window.is_window_active());
+                    cx.notify();
+                });
+                if tick.is_err() {
                     break;
                 }
             }
@@ -375,6 +383,7 @@ impl Popcorn {
             focus: cx.focus_handle(),
             notice: None,
             deleting: None,
+            closing: false,
             refreshing: None,
             intro_seen: false,
             review: None,
@@ -391,6 +400,7 @@ impl Popcorn {
                 this.apply_appearance(window);
                 cx.notify();
             }),
+            pinged: 0,
         };
         me.apply_appearance(window);
         me
@@ -420,6 +430,30 @@ impl Popcorn {
         }
     }
 
+    /// A desktop notification with a sound for each new question, while Popcorn is not in front.
+    /// The page already shows the question when you look at it.
+    fn ping_new_asks(&mut self, active: bool) {
+        let (seen, mut new) = (self.pinged, Vec::new());
+        for c in &self.cases {
+            for a in c.policy.asks.lock().unwrap().iter().filter(|a| a.id > seen) {
+                self.pinged = self.pinged.max(a.id);
+                new.push((c.name.clone(), a.target.clone()));
+            }
+        }
+        if active || new.is_empty() {
+            return;
+        }
+        let (corn, target) = &new[0];
+        let body = if new.len() == 1 { format!("{corn} wants to connect to {target}.") } else { format!("{} connections wait for your answer.", new.len()) };
+        // ponytail: needs notify-send (libnotify) on the desktop; without it, no ping.
+        std::thread::spawn(move || {
+            std::process::Command::new("notify-send")
+                .args(["--app-name=Popcorn", "--icon=popcorn", "--hint=string:sound-name:message-new-instant", "--hint=string:desktop-entry:popcorn", "Popcorn asks", &body])
+                .status()
+                .ok();
+        });
+    }
+
     /// Answer the oldest question of the selected case.
     fn answer_first(&mut self, a: Answer) -> bool {
         let Some(c) = self.cases.get(self.selected) else { return false };
@@ -436,6 +470,11 @@ impl Popcorn {
         if self.settings && k.key == "escape" {
             self.settings = false;
             self.confirm_erase = false;
+            cx.notify();
+            return;
+        }
+        if self.closing && k.key == "escape" {
+            self.closing = false;
             cx.notify();
             return;
         }
@@ -532,6 +571,74 @@ impl Popcorn {
                                     this.delete_confirmed();
                                     cx.notify();
                                 }))),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Closing Popcorn stops every corn. With a terminal open, ask first; true means close now.
+    fn may_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.cases.iter().any(Case::terminal_open) {
+            return true;
+        }
+        self.closing = true;
+        cx.notify();
+        false
+    }
+
+    fn close_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.closing {
+            return None;
+        }
+        let t = theme();
+        let open: Vec<&str> = self.cases.iter().filter(|c| c.terminal_open()).map(|c| c.name.as_str()).collect();
+        let text = match open.as_slice() {
+            [] => "Closing Popcorn stops every corn.".to_string(),
+            [one] => format!("A terminal is open in {one}. Closing Popcorn stops every corn, and the terminal disconnects."),
+            many => format!("Terminals are open in {}. Closing Popcorn stops every corn, and the terminals disconnect.", many.join(", ")),
+        };
+        Some(
+            div()
+                .id("close-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0., 0., 0., 0.32))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                    this.closing = false;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(440.))
+                        .p_6()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .bg(t.bg)
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(t.seam)
+                        .shadow_xl()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().text_size(px(19.)).font_weight(FontWeight::SEMIBOLD).child("Close Popcorn?"))
+                        .child(div().text_color(t.muted).line_height(px(21.)).child(text))
+                        .child(
+                            div()
+                                .pt_3()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(button("cancel-close", None, "Cancel", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
+                                    this.closing = false;
+                                    cx.notify();
+                                })))
+                                .child(button("confirm-close", Some("square-stop"), "Close and stop corns", Look::Danger).on_click(|_, window, _| window.remove_window())),
                         ),
                 )
                 .into_any_element(),
@@ -847,6 +954,7 @@ impl Popcorn {
             std::fs::remove_dir_all(cfg).ok();
         }
         std::fs::remove_dir_all(sandbox::corns()).ok();
+        gate::forget_all();
         self.selected = 0;
         self.has_name = false;
         self.has_key = gate::credential().is_some();
@@ -1191,7 +1299,7 @@ impl Popcorn {
             let r = cx.background_executor().spawn(async move { sandbox::export(&dir, &log) }).await;
             this.update(cx, |this, cx| {
                 this.notice = Some(match r {
-                    Ok((_, 0)) => ("The outbox is empty. Tell Claude to save results in ~/outbox. Then export again.".into(), false),
+                    Ok((_, 0)) => ("The outbox is empty. Save results in ~/outbox. Then export again.".into(), false),
                     Ok((path, n)) => {
                         std::process::Command::new("xdg-open").arg(&path).spawn().ok();
                         (format!("Exported {n} file{} to {}", if n == 1 { "" } else { "s" }, path.display()), true)
@@ -1404,9 +1512,16 @@ impl Popcorn {
                 window.focus(&this.focus);
                 cx.notify();
             }))).when(!mac, |d| {
-                d.when(controls.minimize, |d| d.child(control("min", "minus", WindowControlArea::Min, false, |w| w.minimize_window())))
-                    .when(controls.maximize, |d| d.child(control("max", if maximized { "copy" } else { "square" }, WindowControlArea::Max, false, |w| w.zoom_window())))
-                    .child(control("close", "x", WindowControlArea::Close, true, |w| w.remove_window()))
+                d.when(controls.minimize, |d| d.child(control("min", "minus", WindowControlArea::Min, false, |w, _| w.minimize_window())))
+                    .when(controls.maximize, |d| d.child(control("max", if maximized { "copy" } else { "square" }, WindowControlArea::Max, false, |w, _| w.zoom_window())))
+                    .child(control("close", "x", WindowControlArea::Close, true, {
+                    let v = cx.entity().downgrade();
+                    move |w, cx| {
+                        if v.update(cx, |v, cx| v.may_close(cx)).unwrap_or(true) {
+                            w.remove_window();
+                        }
+                    }
+                }))
             }))
     }
 
@@ -1557,7 +1672,7 @@ impl Popcorn {
                                 .flex()
                                 .flex_col()
                                 .gap_3()
-                                .child(step(3, self.has_key, "Connect Claude", "The token stays on this computer. Popcorn adds it only to requests to api.anthropic.com. Code in a corn cannot read it."))
+                                .child(step(3, self.has_key, "Connect Claude", "The token stays on this computer. Popcorn adds it only to requests to api.anthropic.com."))
                                 .when(self.has_name && !self.has_key, |d| {
                                     d.child(div().pl(px(42.)).child(self.token_form(true, window, cx)))
                                 }),
@@ -1890,7 +2005,7 @@ impl Popcorn {
     fn airlock(&self, c: &Case, x: &Crossings, cx: &mut Context<Self>) -> AnyElement {
         let t = theme();
         let sealed = c.mode == Mode::Sealed;
-        let mine: Vec<String> = c.policy.allow.lock().unwrap().iter().cloned().collect();
+        let mine: Vec<String> = gate::allowed().lock().unwrap().iter().cloned().collect();
         let lane_with = |icon: &'static str, tint: Hsla, name: &str, badge: Option<AnyElement>, rule: &str, count: usize, color: Hsla| {
             div()
                 .py_3()
@@ -2031,7 +2146,7 @@ impl Popcorn {
                     .child(lane("folder-lock", "Files out", "Only files that you export from ~/outbox. They cannot run.", x.files_out, t.fg)),
             )
             .child(div().pt_6().pb_2().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child("Always allowed"))
-            .when(mine.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("Hosts that you always allow show here.")))
+            .when(mine.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("Hosts that you always allow show here. They apply to every corn.")))
             .children(mine.into_iter().enumerate().map(|(i, h)| {
                 let host = h.clone();
                 div()
@@ -2040,10 +2155,8 @@ impl Popcorn {
                     .items_center()
                     .gap_2()
                     .child(div().flex_1().min_w_0().truncate().font_family(CODE_FONT).text_size(px(13.)).child(h))
-                    .child(button(("forget", i), None, "Remove", Look::Quiet).h(px(24.)).text_color(t.muted).on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(c) = this.cases.get(this.selected) {
-                            c.policy.forget(&host);
-                        }
+                    .child(button(("forget", i), None, "Remove", Look::Quiet).h(px(24.)).text_color(t.muted).on_click(cx.listener(move |_, _, _, cx| {
+                        gate::forget(&host);
                         cx.notify();
                     })))
             }))
@@ -2300,6 +2413,7 @@ impl Render for Popcorn {
             .child(panel)
             .children(self.delete_dialog(cx))
             .children(self.refresh_dialog(cx))
+            .children(self.close_dialog(cx))
             .children(self.settings_dialog(cx))
             .children(self.connect_dialog(window, cx));
 
@@ -2407,6 +2521,9 @@ fn main() {
             },
             |window, cx| {
                 let view = cx.new(|cx| Popcorn::new(window, cx));
+                // The window manager's close (Alt+F4, the dock) asks like the close button.
+                let v = view.downgrade();
+                window.on_window_should_close(cx, move |_, cx| v.update(cx, |v, cx| v.may_close(cx)).unwrap_or(true));
                 // Focus the token field on first run, so typing or pasting works right away.
                 // Focus the first field still to fill, so typing works right away.
                 let (n, k, name, token, focus) = view.read_with(cx, |v, _| (v.has_name, v.has_key, v.name_focus.clone(), v.token_focus.clone(), v.focus.clone()));

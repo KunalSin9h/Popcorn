@@ -30,7 +30,7 @@ kernel. It boots in about one second.
 <img src="assets/screenshots/review.png" width="340" align="right" alt="Review each changed file before it is written back">
 
 - **Terminal:** a shell in the corn.
-- **Network:** you deny, allow once or always allow each new host.
+- **Network:** you deny, allow once or always allow each new host. Always allow applies to every corn.
 - **Files in:** drop or pick files. They land in `~/inbox`.
 - **Files out:** export from `~/outbox` as copies that cannot run.
 - **Shared folder:** the corn works on a copy. You approve each change before Popcorn writes it back.

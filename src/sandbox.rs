@@ -178,7 +178,7 @@ impl Case {
         };
         let name = case_name(&dir);
         let log = Arc::new(Mutex::new(gate::read_log(&dir)));
-        let policy = Policy::load(&dir, mode);
+        let policy = Policy::new(mode);
         Case { name, dir, mode, policy, log, started: None, vm: None }
     }
 
@@ -312,6 +312,11 @@ impl Case {
         fs::remove_dir_all(&self.dir).ok();
     }
 
+    /// True while a terminal window is attached: each `attach` holds a shared lock on this file.
+    pub fn terminal_open(&self) -> bool {
+        fs::File::open(self.dir.join("terminal.lock")).is_ok_and(|f| f.try_lock().is_err())
+    }
+
     /// Open a terminal window with a shell inside the case.
     pub fn open_terminal(&self) -> Result<(), String> {
         // After an upgrade or rebuild replaces the running binary, Linux reports its path with
@@ -429,6 +434,8 @@ pub fn attach(dir: &Path) -> ! {
             std::process::exit(1);
         }
     };
+    // Hold this lock until the terminal closes, so Popcorn knows a terminal is open.
+    let _terminal = fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("terminal.lock")).and_then(|f| f.lock_shared().map(|_| f));
     // Tell the guest shell what terminal it is talking to and how big it is, then clear the
     // screen. The leading space keeps this line out of the shell history.
     let term = std::env::var("TERM").ok().filter(|t| !t.is_empty() && t != "dumb").unwrap_or_else(|| "xterm-256color".into());
@@ -438,15 +445,15 @@ pub fn attach(dir: &Path) -> ! {
     let name: String = case_name(dir).chars().filter(|c| c.is_alphanumeric() || " ._-".contains(*c)).collect();
     {
         let mut o = std::io::stdout();
-        // "Husk": bottle-green glass, mint text, sodium-yellow cursor. The 16 ANSI colors keep their
-        // usual meaning, tuned to read well on the green, with one change: Claude Code runs with an
-        // ANSI theme in the corn and draws its mark in bright red (slot 9), so slot 9 is mustard.
+        // "Husk": warm charcoal, off-white text, corn-yellow cursor. The 16 ANSI colors keep their
+        // usual meaning and all read at 5:1 or more on the charcoal, with one change: Claude Code
+        // runs with an ANSI theme in the corn and draws its mark in bright red (slot 9), so slot 9 is green.
         const PALETTE: [&str; 16] = [
-            "#163d33", "#f07a62", "#9adb7e", "#f0be2c", "#7db8f0", "#e39bd0", "#5fd6c4", "#cfe0d6",
-            "#6a9486", "#d4a017", "#b8eb9c", "#ffd86a", "#a2cdf7", "#f0b8e2", "#8be6d8", "#f4faf5",
+            "#2e2c29", "#f07a62", "#8fd18a", "#f0be2c", "#7db8f0", "#e39bd0", "#5fd6c4", "#d6d2ca",
+            "#9a958c", "#5ee08a", "#a8e6a0", "#ffd86a", "#a2cdf7", "#f0b8e2", "#8be6d8", "#f7f5f0",
         ];
         let palette: String = PALETTE.iter().enumerate().map(|(i, c)| format!("\x1b]4;{i};{c}\x07")).collect();
-        let _ = write!(o, "\x1b]0;🌽 {name}\x07\x1b]10;#e6efe4\x07\x1b]11;#0d2621\x07\x1b]12;#f0be2c\x07\x1b]17;#24584a\x07{palette}");
+        let _ = write!(o, "\x1b]0;🌽 {name}\x07\x1b]10;#ebe8e2\x07\x1b]11;#1c1b19\x07\x1b]12;#f0be2c\x07\x1b]17;#3d3a35\x07{palette}");
         let _ = o.flush();
     }
     let ps1 = format!(r"\[\e[1;30;43m\] {name} \[\e[0m\] \[\e[32m\]\u@popcorn\[\e[0m\]:\[\e[36m\]\w\[\e[0m\]\$ ");
@@ -457,7 +464,7 @@ pub fn attach(dir: &Path) -> ! {
         // ponytail: size is set once; resizing the window later does not reach the guest.
         setup.push_str(&format!("; stty rows {rows} cols {cols}"));
     }
-    // Claude Code in an ANSI theme takes its colors from this terminal, so its mark turns mustard.
+    // Claude Code in an ANSI theme takes its colors from this terminal, so its mark turns green.
     // Only the image's default ("dark") is switched; a theme you picked stays.
     // ponytail: edits ~/.claude.json on each attach; move to the image's claude.json at the next release.
     setup.push_str(r#"; sed -i 's/"theme": *"dark"/"theme": "dark-ansi"/' ~/.claude.json 2>/dev/null"#);
@@ -499,6 +506,20 @@ mod tests {
         assert_eq!(numbered("report.pdf", 2), "report (2).pdf");
         assert_eq!(numbered("pkg", 3), "pkg (3)");
         assert_eq!(numbered(".env", 2), ".env (2)");
+    }
+
+    #[test]
+    fn terminal_lock_shows_an_open_terminal() {
+        let dir = std::env::temp_dir().join(format!("popcorn-lock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let case = Case::open(dir.clone());
+        assert!(!case.terminal_open(), "no lock file: no terminal");
+        let held = fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("terminal.lock")).unwrap();
+        held.lock_shared().unwrap();
+        assert!(case.terminal_open(), "an attach holds the lock");
+        drop(held);
+        assert!(!case.terminal_open(), "the terminal closed");
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]
