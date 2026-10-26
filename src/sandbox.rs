@@ -250,12 +250,14 @@ impl Case {
         }
         // The gate must be listening before the guest dials out.
         gate::serve(&sock(&self.dir), self.policy.clone(), self.log.clone(), self.dir.clone())?;
+        // Skills synced from your computer (Settings), as a third, read-only drive.
+        let skills = Some(crate::skills::image()).filter(|p| p.exists());
         let config = format!(
             r#"{{
   "boot-source": {{"kernel_image_path": "{kernel}", "boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/sbin/popcorn-init popcorn.auth={auth} popcorn.user={user}"}},
   "drives": [
     {{"drive_id": "golden", "path_on_host": "{golden}", "is_root_device": true, "is_read_only": true}},
-    {{"drive_id": "case", "path_on_host": "{disk}", "is_root_device": false, "is_read_only": false}}
+    {{"drive_id": "case", "path_on_host": "{disk}", "is_root_device": false, "is_read_only": false}}{skills_drive}
   ],
   "machine-config": {{"vcpu_count": 2, "mem_size_mib": 2048}},
   "vsock": {{"guest_cid": 3, "uds_path": "{sock}"}}
@@ -266,6 +268,10 @@ impl Case {
             golden = image.display(),
             disk = self.dir.join("disk.ext4").display(),
             sock = sock(&self.dir).display(),
+            skills_drive = match &skills {
+                Some(p) => format!(",\n    {{\"drive_id\": \"skills\", \"path_on_host\": \"{}\", \"is_root_device\": false, \"is_read_only\": true}}", p.display()),
+                None => String::new(),
+            },
         );
         fs::write(self.dir.join("vm.json"), config).map_err(|e| e.to_string())?;
         let console = fs::File::create(self.dir.join("console.log")).map_err(|e| e.to_string())?;
@@ -278,7 +284,7 @@ impl Case {
         let (firecracker, kernel, vm_json, disk) = (vm_file("firecracker"), vm_file("vmlinux"), self.dir.join("vm.json"), self.dir.join("disk.ext4"));
         let mut cmd = Command::new("bwrap");
         cmd.args(["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
-        for ro in [&firecracker, &kernel, &image, &vm_json] {
+        for ro in [&firecracker, &kernel, &image, &vm_json].into_iter().chain(skills.as_ref()) {
             cmd.arg("--ro-bind").arg(ro).arg(ro);
         }
         for rw in [&disk, &self.dir.join("vm")] {
@@ -686,6 +692,12 @@ mod tests {
             std::env::set_var("POPCORN_CLAUDE_KEY", "sk-ant-api03-fake-key-for-tests");
             std::env::set_var("POPCORN_USER", "tester");
         }
+        // A synced skill: a read-only drive that the corn copies into ~/.claude/skills at boot.
+        let skill_src = std::env::temp_dir().join(format!("popcorn-skill-src-{}", std::process::id()));
+        fs::create_dir_all(skill_src.join("demo")).unwrap();
+        fs::write(skill_src.join("demo/SKILL.md"), "# demo skill").unwrap();
+        crate::skills::pack(&skill_src, &["demo".to_string()].into(), &home()).unwrap();
+        fs::remove_dir_all(&skill_src).ok();
         let mut case = Case::create().unwrap();
         case.start().unwrap();
         let sock = sock(&case.dir);
@@ -760,6 +772,7 @@ mod tests {
         let unshared = crate::share::get(&case.dir).is_none();
         fs::remove_dir_all(&host).ok();
         let ping = sh(&mut s, "ping -c1 -W2 127.0.0.1 | grep -c ' 0% packet loss'", Duration::from_secs(10));
+        let skill = sh(&mut s, "cat ~/.claude/skills/demo/SKILL.md; stat -c 'owner=%U' ~/.claude/skills/demo/SKILL.md; grep -c vdc /proc/mounts", Duration::from_secs(10));
         let ver = sh(&mut s, "claude --version", Duration::from_secs(30));
         eprintln!("--- claude: {ver}");
 
@@ -784,6 +797,8 @@ mod tests {
         assert!(a_kept, "a denied deletion leaves the file alone");
         assert!(inbox.contains("first") && inbox.contains("second"), "a copy never replaces a file: {inbox}");
         assert!(unshared, "stop sharing forgets the folder");
+        assert!(skill.contains("# demo skill") && skill.contains("owner=tester"), "the synced skill is in the corn: {skill}");
+        assert!(skill.lines().any(|l| l.trim().trim_start_matches("\u{1b}[?2004l").trim() == "0"), "the skills drive is not left mounted: {skill}");
     }
 }
 

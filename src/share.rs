@@ -174,7 +174,7 @@ fn global_ignore() -> Option<PathBuf> {
 
 /// Refuse places that would hand a corn your secrets: your home folder, anything above it, and
 /// folders holding SSH or GPG keys or settings.
-fn refuse_secrets(p: &Path) -> Result<(), String> {
+pub fn refuse_secrets(p: &Path) -> Result<(), String> {
     let home = std::env::home_dir().and_then(|h| h.canonicalize().ok()).unwrap_or_default();
     if p == Path::new("/") || home.starts_with(p) {
         return Err(format!("{} contains your home folder. Select a project folder or specific files.", p.display()));

@@ -21,6 +21,7 @@ src/
   sandbox.rs   Corns: create, start, stop, delete, terminal attach, file copy, export
   gate.rs      Network gate, Claude proxy, safe tar reader, activity log
   share.rs     Shared folder: git bundles in and out, review, apply approved files
+  skills.rs    Skills: copy picked skills from ~/.claude/skills into a read-only image for every corn
   theme.rs     Light and dark palettes, appearance setting
   icons.rs     Embedded assets
 guest/
@@ -123,7 +124,8 @@ address that does not need a login.
 | `~/.local/share/popcorn/golden.ext4` | Read-only workbench image of a development build |
 | `~/.local/share/popcorn/allow` | Hosts you always allow, one for each line. All corns use this list. |
 | `~/.local/share/popcorn/corns/<corn>/` | `disk.ext4`, `image`, `vm.json`, `console.log`, `activity.log`, `mode`, `title`, `inbox.sent`, `share`, `terminal.lock`, sockets. Older versions used `cases/`; Popcorn moves it. |
-| `~/.config/popcorn/` | `user`, `claude-key` (mode 0600), `appearance`, `claude-skipped` |
+| `~/.local/share/popcorn/skills/`, `skills.ext4` | Skills from the last sync, and the read-only image that every corn gets as a third drive |
+| `~/.config/popcorn/` | `user`, `claude-key` (mode 0600), `appearance`, `claude-skipped`, `skills` (the picked skills) |
 
 ## Vsock channels
 
@@ -165,11 +167,12 @@ rm -rf $H
 
 | Test | Checks |
 |---|---|
-| `case_boots_isolated_and_gated` | No network card. Denied host refused. Internal addresses refused, literal or resolved. Allowed host works. Claude proxy swaps the token, works while sealed, and returns 401 with no token. Token not in the guest. Outbox export drops links. Shared folder: secrets stay home, changes detected, only approved files written. Runs Firecracker inside bubblewrap. |
+| `case_boots_isolated_and_gated` | No network card. Denied host refused. Internal addresses refused, literal or resolved. Allowed host works. Claude proxy swaps the token, works while sealed, and returns 401 with no token. Token not in the guest. Outbox export drops links. Shared folder: secrets stay home, changes detected, only approved files written. Runs Firecracker inside bubblewrap. A synced skill is in the corn. |
 | `attach_is_responsive` | Terminal echo under 150 ms, `TERM` set, prompt shows the user name. |
 | `internal_addresses_are_not_public` | Loopback, private, link-local, metadata, multicast and mapped IPv6 addresses are refused; public ones pass. |
 | `import_keeps_only_plain_files_inside_quarantine` | Tar reader drops links, devices and unsafe paths. |
 | `shares_through_git_and_trusts_nothing_back` | Ignored files stay home. Other version control folders stay home, and a folder with `.hgignore` rules is refused until they are in `.gitignore`. The corn's links are never offered. Your own edits are flagged. New files are never executable. Applied changes are not offered again. A forged `.git` path and garbage bundles are refused. |
+| `syncs_only_plain_files_of_chosen_skills` | Only folders with a SKILL.md sync. A skill that is a link is followed; links inside a skill are not. No setuid bits. A skill removed from your computer is dropped. An empty sync still makes an image, so corns remove old skills. |
 | `writes_stay_inside_the_folder` | Approved writes never leave the folder or go through a link. |
 | `refuses_home_and_secret_folders` | Home, `/`, folders above home and folders with keys are refused. |
 | `terminal_drops_clipboard_escapes` | Clipboard escapes from the corn never reach your terminal, in any form or split; other output passes. |

@@ -33,6 +33,7 @@ kernel. It boots in about one second.
 - **Network:** you deny, allow once or always allow each new host. Always allow applies to every corn.
 - **Files in:** drop or pick files. They land in `~/inbox`.
 - **Files out:** export from `~/outbox` as copies that cannot run.
+- **Skills:** pick Claude skills from `~/.claude/skills` in Settings. Sync copies them into every corn, one way.
 - **Shared folder:** the corn works on a copy, sent with git. Ignored files stay home, so large projects work. You approve each change before Popcorn writes it back.
 
 <br clear="right">

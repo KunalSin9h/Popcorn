@@ -32,6 +32,22 @@ id "$user" >/dev/null 2>&1 || user=analyst
 home="/home/$user"
 echo "$user" > /run/popcorn-user
 
+# Skills synced from the host (Settings > Skills) arrive as a read-only drive. Replace the skills
+# of the last sync with this one; skills made in the corn under other names stay.
+if [ -b /dev/vdc ] && mkdir -p /run/skills && mount -t ext4 -o ro,nodev,nosuid,noexec /dev/vdc /run/skills; then
+  s="$home/.claude/skills"
+  mkdir -p "$s"
+  for n in $(cat "$s/.popcorn-synced" 2>/dev/null); do case "$n" in */* | .*) ;; *) rm -rf "${s:?}/$n" ;; esac; done
+  : > "$s/.popcorn-synced"
+  for d in /run/skills/*/; do
+    n=$(basename "$d")
+    [ "$n" = lost+found ] && continue
+    rm -rf "${s:?}/$n" && cp -r "$d" "$s/$n" && echo "$n" >> "$s/.popcorn-synced"
+  done
+  umount /run/skills
+  chown "$user:$user" "$home/.claude" && chown -R "$user:$user" "$s"
+fi
+
 # Host CID is 2. 1080: allowlisted egress (HTTP CONNECT). 1081: Anthropic API, key added on host.
 socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:1080 &
 socat TCP-LISTEN:8080,bind=127.0.0.1,fork,reuseaddr VSOCK-CONNECT:2:1081 &

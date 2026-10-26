@@ -3,6 +3,7 @@ mod gate;
 mod icons;
 mod sandbox;
 mod share;
+mod skills;
 mod theme;
 
 use gate::{Answer, Event, Kind};
@@ -47,6 +48,10 @@ struct Popcorn {
     /// The Connect Claude dialog is open.
     connecting: bool,
     settings: bool,
+    /// Settings > Skills: what ~/.claude/skills holds, which are picked, and a sync running.
+    skill_list: Vec<skills::Skill>,
+    skill_pick: std::collections::BTreeSet<String>,
+    syncing: bool,
     /// The Erase button was pressed once; the next press erases.
     confirm_erase: bool,
     /// The setup command was just copied; the button says so.
@@ -378,6 +383,9 @@ impl Popcorn {
             claude_skipped: std::env::home_dir().is_some_and(|h| h.join(".config/popcorn/claude-skipped").exists()),
             connecting: false,
             settings: false,
+            skill_list: Vec::new(),
+            skill_pick: Default::default(),
+            syncing: false,
             confirm_erase: false,
             copied: false,
             focus: cx.focus_handle(),
@@ -955,6 +963,7 @@ impl Popcorn {
         }
         std::fs::remove_dir_all(sandbox::corns()).ok();
         gate::forget_all();
+        skills::forget();
         self.selected = 0;
         self.has_name = false;
         self.has_key = gate::credential().is_some();
@@ -1079,6 +1088,8 @@ impl Popcorn {
                         .child(div().h(px(1.)).bg(t.seam))
                         .child(div().flex().flex_col().gap_2().child(section("Claude")).child(claude))
                         .child(div().h(px(1.)).bg(t.seam))
+                        .child(self.skills_section(cx))
+                        .child(div().h(px(1.)).bg(t.seam))
                         .child(
                             div()
                                 .flex()
@@ -1107,7 +1118,7 @@ impl Popcorn {
                                             cx.notify();
                                         })))),
                         )
-                        .when_some(self.notice.clone().filter(|(_, ok)| !ok), |d, (msg, _)| d.child(div().text_size(px(13.)).text_color(t.bad).child(msg)))
+                        .when_some(self.notice.clone(), |d, (msg, ok)| d.child(div().text_size(px(13.)).text_color(if ok { t.ok } else { t.bad }).child(msg)))
                         .child(div().flex().justify_end().child(button("settings-close", None, "Close", Look::Plain).on_click(cx.listener(|this, _, _, cx| {
                             this.settings = false;
                             cx.notify();
@@ -1115,6 +1126,91 @@ impl Popcorn {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Settings > Skills: pick skills from ~/.claude/skills, then Sync copies them into every
+    /// corn. One way: nothing from a corn comes back.
+    fn skills_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme();
+        let synced = skills::image().exists();
+        let rows = self.skill_list.iter().map(|s| {
+            let on = self.skill_pick.contains(&s.name);
+            let name = s.name.clone();
+            div()
+                .id(SharedString::from(format!("skill-{}", s.name)))
+                .py_1()
+                .flex()
+                .items_start()
+                .gap_2()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.skill_pick.remove(&name) {
+                        this.skill_pick.insert(name.clone());
+                    }
+                    this.notice = skills::set_chosen(&this.skill_pick).err().map(|e| (e, false));
+                    cx.notify();
+                }))
+                .child(ui_icon(if on { "circle-check" } else { "square" }).mt(px(2.)).size(px(14.)).text_color(if on { t.ok } else { t.faint }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(13.)).font_family(CODE_FONT).truncate().child(s.name.clone()))
+                        .when(!s.flagged.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(t.bad).child(format!("Check before you sync: {}", s.flagged.join(", "))))),
+                )
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(t.muted).child("Skills"))
+            .child(div().text_size(px(12.5)).text_color(t.muted).line_height(px(18.)).child(
+                "Select skills from ~/.claude/skills. Sync copies them into every corn. Code in a corn can read them. A corn gets a sync when it starts.",
+            ))
+            .child(
+                div()
+                    .id("skill-list")
+                    .max_h(px(180.))
+                    .overflow_y_scroll()
+                    .when(self.skill_list.is_empty(), |d| d.child(div().text_size(px(13.)).text_color(t.faint).child("No skills in ~/.claude/skills.")))
+                    .children(rows),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().text_size(px(12.5)).text_color(t.faint).child(format!(
+                        "{} selected{}",
+                        self.skill_pick.len(),
+                        if synced { "" } else { ", not synced yet" }
+                    )))
+                    .child(button("sync-skills", Some("refresh-cw"), if self.syncing { "Syncing" } else { "Sync" }, Look::Plain).on_click(cx.listener(|this, _, _, cx| this.sync_skills(cx)))),
+            )
+            .into_any_element()
+    }
+
+    fn sync_skills(&mut self, cx: &mut Context<Self>) {
+        if self.syncing {
+            return;
+        }
+        self.syncing = true;
+        cx.spawn(async move |this, cx| {
+            let r = cx.background_executor().spawn(async move { skills::sync() }).await;
+            this.update(cx, |this, cx| {
+                this.syncing = false;
+                this.notice = Some(match r {
+                    Ok(n) => (format!("Synced {n} skill{}. Corns get them when they start.", if n == 1 { "" } else { "s" }), true),
+                    Err(e) => (e, false),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Add a Claude token after setup was skipped.
@@ -1508,6 +1604,8 @@ impl Popcorn {
             }))
             .child(div().flex().items_center().gap_0p5().child(control_like("settings", "settings", cx.listener(|this, _, window, cx| {
                 this.settings = true;
+                this.skill_list = skills::available();
+                this.skill_pick = skills::chosen();
                 this.notice = None;
                 window.focus(&this.focus);
                 cx.notify();
