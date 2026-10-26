@@ -40,9 +40,10 @@ socat VSOCK-LISTEN:1024,fork,reuseaddr EXEC:"su - $user",pty,stderr,setsid,sigin
 socat VSOCK-LISTEN:1025,fork,reuseaddr EXEC:/usr/local/bin/popcorn-inbox &
 # 1026 sends ~/outbox to the host when you ask for it: regular files only, at most 50 MB each.
 socat VSOCK-LISTEN:1026,fork,reuseaddr EXEC:/usr/local/bin/popcorn-outbox &
-# 1027 receives a shared folder snapshot into ~/work/<name>; 1028 sends it back for review.
-socat VSOCK-LISTEN:1027,fork,reuseaddr EXEC:/usr/local/bin/popcorn-share-in &
-socat VSOCK-LISTEN:1028,fork,reuseaddr EXEC:/usr/local/bin/popcorn-share-out &
+# 1029 receives a shared folder as a git bundle into ~/work/<name>; 1030 sends the corn's
+# version back as a bundle of new objects, for review on the host.
+socat VSOCK-LISTEN:1029,fork,reuseaddr EXEC:/usr/local/bin/popcorn-git-in &
+socat VSOCK-LISTEN:1030,fork,reuseaddr EXEC:/usr/local/bin/popcorn-git-out &
 
 # ponytail: the host stops a case by killing the VM, so flush the case disk often.
 while true; do sleep 3; sync; done

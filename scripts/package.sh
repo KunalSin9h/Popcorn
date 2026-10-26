@@ -40,7 +40,7 @@ Package: popcorn
 Version: $version
 Architecture: amd64
 Maintainer: Popcorn developers
-Depends: libc6, libvulkan1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libfontconfig1, libfreetype6, libx11-6, libxcb1, e2fsprogs, tar, diffutils, curl
+Depends: libc6, libvulkan1, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libfontconfig1, libfreetype6, libx11-6, libxcb1, e2fsprogs, tar, curl, bubblewrap, git
 Section: utils
 Priority: optional
 Description: Security workbench of disposable microVMs

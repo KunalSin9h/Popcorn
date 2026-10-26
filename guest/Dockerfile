@@ -30,6 +30,6 @@ COPY profile.sh /etc/profile.d/popcorn.sh
 COPY channels.sh /usr/local/bin/popcorn-channels
 COPY claude.json /home/analyst/.claude.json
 RUN chmod 755 /sbin/popcorn-init /sbin/popcorn-stage2 /usr/local/bin/popcorn-channels \
-    && for c in inbox outbox share-in share-out; do ln -s popcorn-channels /usr/local/bin/popcorn-$c; done \
+    && for c in inbox outbox git-in git-out; do ln -s popcorn-channels /usr/local/bin/popcorn-$c; done \
     && chown analyst:analyst /home/analyst/.claude.json \
     && echo popcorn > /etc/hostname

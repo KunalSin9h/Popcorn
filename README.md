@@ -33,7 +33,7 @@ kernel. It boots in about one second.
 - **Network:** you deny, allow once or always allow each new host. Always allow applies to every corn.
 - **Files in:** drop or pick files. They land in `~/inbox`.
 - **Files out:** export from `~/outbox` as copies that cannot run.
-- **Shared folder:** the corn works on a copy. You approve each change before Popcorn writes it back.
+- **Shared folder:** the corn works on a copy, sent with git. Ignored files stay home, so large projects work. You approve each change before Popcorn writes it back.
 
 <br clear="right">
 
@@ -42,6 +42,7 @@ kernel. It boots in about one second.
 | Guarantee | How |
 |---|---|
 | Own kernel | Each corn is a separate VM. A kernel exploit stays inside. |
+| Second wall | Firecracker runs inside bubblewrap. It sees only its disk, image and kernel, with no network, no home folder and no other processes. |
 | No network card | The corn talks only to Popcorn, over a private channel. |
 | You approve each new host | Popcorn holds the connection and asks. No answer in 90 seconds means no. |
 | No access to your network | Popcorn refuses loopback, private and link-local addresses, even for allowed hosts. It connects only to addresses it checked. |
@@ -49,12 +50,13 @@ kernel. It boots in about one second.
 | No access to your files | Popcorn mounts no host folder. The corn has its own system and disk. |
 | Files leave only on export | Exports are plain copies. |
 | Clipboard stays yours | The terminal drops clipboard escapes (OSC 52) from the corn, so code in a corn cannot set or read your clipboard. |
-| Folder changes need approval | Popcorn writes only the files you approve, and only inside that folder. |
-| Keys stay outside | Popcorn refuses to share your home folder or any folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It skips `.git` and ignored files. |
+| Folder changes need approval | Popcorn writes only the files you approve, and only inside that folder. It never writes links, `.git` or executable files. |
+| Changes are checked | The corn's changes arrive as a git bundle. Popcorn checks each object, keeps them in a separate repository, and never runs their hooks, filters or checkout. |
+| Keys stay outside | Popcorn refuses to share your home folder or any folder with `.ssh`, `.gnupg`, `.aws` or `.config`. It skips `.git` and ignored files, and the folders of Mercurial, Subversion and other version control systems. |
 
 ### Limits
 
-- A hypervisor escape is rare but possible. Firecracker runs as your user, without its jailer.
+- A hypervisor escape is rare but possible. Firecracker then still runs inside bubblewrap, as your user. Popcorn does not use the jailer, which needs root.
 - An allowed host can receive data from the corn.
 - The terminal shows output from the corn. A bug in your terminal app is outside Popcorn.
 - Keep your kernel and Firecracker up to date.

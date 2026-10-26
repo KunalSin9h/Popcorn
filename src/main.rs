@@ -1252,9 +1252,9 @@ impl Popcorn {
     fn review_changes(&mut self, cx: &mut Context<Self>) {
         let corn = self.selected;
         let Some(c) = self.case() else { return };
-        let dir = c.dir.clone();
+        let (dir, log) = (c.dir.clone(), c.log.clone());
         cx.spawn(async move |this, cx| {
-            let r = cx.background_executor().spawn(async move { share::pull(&dir) }).await;
+            let r = cx.background_executor().spawn(async move { share::pull(&dir, &log) }).await;
             this.update(cx, |this, cx| {
                 match r {
                     Ok(changes) if changes.is_empty() => this.notice = Some(("There are no changes.".into(), true)),

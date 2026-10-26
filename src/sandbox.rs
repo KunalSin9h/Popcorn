@@ -232,9 +232,6 @@ impl Case {
         }
     }
 
-    fn sock(&self) -> PathBuf {
-        self.dir.join("v.sock")
-    }
 
     pub fn start(&mut self) -> Result<(), String> {
         if self.running() {
@@ -247,11 +244,12 @@ impl Case {
         }
         // No token yet is fine: the corn runs, and Claude inside gets the API's authentication error.
         let auth = gate::credential().map(|c| c.kind).unwrap_or(gate::Auth::Key);
-        for p in [self.sock(), gate::port_path(&self.sock(), 1080), gate::port_path(&self.sock(), 1081)] {
+        fs::create_dir_all(self.dir.join("vm")).map_err(|e| e.to_string())?;
+        for p in [sock(&self.dir), gate::port_path(&sock(&self.dir), 1080), gate::port_path(&sock(&self.dir), 1081)] {
             fs::remove_file(p).ok();
         }
         // The gate must be listening before the guest dials out.
-        gate::serve(&self.sock(), self.policy.clone(), self.log.clone(), self.dir.clone())?;
+        gate::serve(&sock(&self.dir), self.policy.clone(), self.log.clone(), self.dir.clone())?;
         let config = format!(
             r#"{{
   "boot-source": {{"kernel_image_path": "{kernel}", "boot_args": "console=ttyS0 reboot=k panic=1 pci=off quiet init=/sbin/popcorn-init popcorn.auth={auth} popcorn.user={user}"}},
@@ -267,14 +265,29 @@ impl Case {
             user = user_name().unwrap_or_else(|| "analyst".into()),
             golden = image.display(),
             disk = self.dir.join("disk.ext4").display(),
-            sock = self.sock().display(),
+            sock = sock(&self.dir).display(),
         );
         fs::write(self.dir.join("vm.json"), config).map_err(|e| e.to_string())?;
         let console = fs::File::create(self.dir.join("console.log")).map_err(|e| e.to_string())?;
-        // ponytail: plain firecracker as this user; wrap in `jailer` (needs root) for a second wall.
-        let mut cmd = Command::new(vm_file("firecracker"));
-        cmd.args(["--no-api", "--config-file"])
-            .arg(self.dir.join("vm.json"))
+        // The second wall: Firecracker runs inside bubblewrap, with its own empty view of the
+        // system. It sees only its own binary, the kernel and the image (read-only), this corn's
+        // disk and its `vm/` folder, and /dev/kvm. No network, no home folder, no other processes,
+        // no capabilities, and no new user namespaces (a common first step of kernel exploits).
+        // Firecracker's own seccomp filters stay on.
+        // ponytail: runs as your user; `jailer` (needs root) would add a separate user and cgroups.
+        let (firecracker, kernel, vm_json, disk) = (vm_file("firecracker"), vm_file("vmlinux"), self.dir.join("vm.json"), self.dir.join("disk.ext4"));
+        let mut cmd = Command::new("bwrap");
+        cmd.args(["--unshare-all", "--unshare-user", "--disable-userns", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv"]);
+        for ro in [&firecracker, &kernel, &image, &vm_json] {
+            cmd.arg("--ro-bind").arg(ro).arg(ro);
+        }
+        for rw in [&disk, &self.dir.join("vm")] {
+            cmd.arg("--bind").arg(rw).arg(rw);
+        }
+        cmd.args(["--dev-bind", "/dev/kvm", "/dev/kvm", "--proc", "/proc", "--"])
+            .arg(&firecracker)
+            .args(["--no-api", "--config-file"])
+            .arg(&vm_json)
             .stdin(Stdio::null())
             .stdout(console.try_clone().map_err(|e| e.to_string())?)
             .stderr(console);
@@ -291,7 +304,10 @@ impl Case {
                 Ok(())
             });
         }
-        let child = cmd.spawn().map_err(|e| format!("could not start firecracker: {e}"))?;
+        let child = cmd.spawn().map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => "Popcorn needs bubblewrap to run a corn. Install the bubblewrap package.".to_string(),
+            _ => format!("Popcorn cannot start the corn: {e}"),
+        })?;
         self.vm = Some(child);
         self.started = Some(std::time::Instant::now());
         gate::record(&self.log, &self.dir, Event::note("Corn started in its own microVM"));
@@ -328,6 +344,12 @@ impl Case {
         };
         open_in_terminal(&[me.as_os_str(), "attach".as_ref(), self.dir.as_os_str()])
     }
+}
+
+/// The corn's vsock socket. It lives in `vm/`, the only folder of the corn that Firecracker can
+/// write to, so a compromised Firecracker cannot change the corn's other files (such as `share`).
+pub fn sock(dir: &Path) -> PathBuf {
+    dir.join("vm/v.sock")
 }
 
 /// Run a command in a new terminal window. Each terminal takes the command differently;
@@ -367,7 +389,7 @@ pub fn send(dir: &Path, log: &Log, path: &Path) -> Result<(), String> {
         tar.arg(format!("--transform=s,^{},{},S", esc(&name_s, "\\.[]*^$,"), esc(&as_name, "\\&,")));
     }
     let mut tar = tar.arg(name).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let mut s = connect(&dir.join("v.sock"), FILES_PORT)?;
+    let mut s = connect(&sock(dir), FILES_PORT)?;
     std::io::copy(tar.stdout.as_mut().unwrap(), &mut s).map_err(|e| e.to_string())?;
     s.shutdown(std::net::Shutdown::Write).ok();
     let mut sink = Vec::new();
@@ -391,7 +413,7 @@ fn numbered(name: &str, i: u32) -> String {
 /// Pull ~/outbox from a running case into `<case>/exported/<n>`, a quarantine folder on the host.
 pub fn export(dir: &Path, log: &Log) -> Result<(PathBuf, usize), String> {
     // Keep our side open: socat ends the guest command shortly after it sees our EOF.
-    let mut s = connect(&dir.join("v.sock"), OUTBOX_PORT)?;
+    let mut s = connect(&sock(dir), OUTBOX_PORT)?;
     let root = dir.join("exported");
     let n = (1..).find(|n| !root.join(n.to_string()).exists()).unwrap();
     let dest = root.join(n.to_string());
@@ -503,7 +525,7 @@ impl NoClipboard {
 
 /// `popcorn attach <case dir>`: bridge this terminal to the shell inside the case.
 pub fn attach(dir: &Path) -> ! {
-    let sock = dir.join("v.sock");
+    let sock = sock(dir);
     let mut s = match (1..=40).find_map(|_| connect(&sock, SHELL_PORT).ok().or_else(|| {
         std::thread::sleep(std::time::Duration::from_millis(250));
         None
@@ -666,7 +688,7 @@ mod tests {
         }
         let mut case = Case::create().unwrap();
         case.start().unwrap();
-        let sock = case.dir.join("v.sock");
+        let sock = sock(&case.dir);
         let mut s = (0..80).find_map(|_| connect(&sock, SHELL_PORT).ok().or_else(|| { std::thread::sleep(Duration::from_millis(250)); None })).expect("shell");
         let net = sh(&mut s, "ls /sys/class/net", Duration::from_secs(10));
         eprintln!("--- interfaces:\n{net}");
@@ -716,9 +738,9 @@ mod tests {
         fs::write(host.join("src/b.rs"), "fn b() {}\n").unwrap();
         let sent = crate::share::send(&case.dir, &case.log, &host).unwrap();
         let name = host.file_name().unwrap().to_string_lossy().to_string();
-        let inside = sh(&mut s, &format!("cd ~/work/{name} && find . -type f | sort | tr '\\n' ' '"), Duration::from_secs(10));
+        let inside = sh(&mut s, &format!("cd ~/work/{name} && find . -path ./.git -prune -o -type f -print | sort | tr '\\n' ' '; grep -c token .git/config"), Duration::from_secs(10));
         sh(&mut s, "echo 'fn b() { todo!() }' > src/b.rs; echo new > c.txt; rm a.txt", Duration::from_secs(10));
-        let changes = crate::share::pull(&case.dir).unwrap();
+        let changes = crate::share::pull(&case.dir, &case.log).unwrap();
         let summary: Vec<String> = changes.iter().map(|c| format!("{:?}:{}", c.kind as u8, c.rel)).collect();
         eprintln!("--- shared {sent} files; inside: {inside}; changes: {summary:?}");
         for c in changes.iter().filter(|c| c.rel != "a.txt") {
@@ -755,7 +777,7 @@ mod tests {
         assert_eq!(n, 1, "only the regular file comes out");
         assert!(exported, "the report reached the quarantine folder");
         assert!(ping.lines().any(|l| l.trim().trim_start_matches("\u{1b}[?2004l").trim() == "1"), "ping works for the user: {ping}");
-        assert!(!inside.contains("secret.env") && !inside.contains(".git/"), "ignored files and .git stay home: {inside}");
+        assert!(!inside.contains("secret.env") && !inside.contains("./.git/") && !inside.contains("\n1"), "ignored files and your .git stay home: {inside}");
         assert!(inside.contains("./src/b.rs") && inside.contains("./a.txt"));
         assert_eq!(summary.len(), 3, "{summary:?}");
         assert!(b.contains("todo!()") && c_txt == "new\n", "approved changes applied");
@@ -781,7 +803,7 @@ mod attach_tests {
         }
         let mut case = Case::create().unwrap();
         case.start().unwrap();
-        let sock = case.dir.join("v.sock");
+        let sock = sock(&case.dir);
         assert!((0..80).any(|_| connect(&sock, SHELL_PORT).is_ok() || { std::thread::sleep(Duration::from_millis(250)); false }));
         let bin = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/popcorn");
         let cmd = format!("{bin} attach {}", case.dir.display());
