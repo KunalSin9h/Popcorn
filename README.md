@@ -44,6 +44,7 @@ kernel. It boots in about one second.
 |---|---|
 | Own kernel | Each corn is a separate VM. A kernel exploit stays inside. |
 | Second wall | Firecracker runs inside bubblewrap. It sees only its disk, image and kernel, with no network, no home folder and no other processes. |
+| Third wall | Landlock, a Linux kernel feature, limits Firecracker to exactly those files. It also closes TCP, and Firecracker cannot signal other programs. This holds even if it gets out of bubblewrap's view. |
 | No network card | The corn talks only to Popcorn, over a private channel. |
 | You approve each new host | Popcorn holds the connection and asks. No answer in 90 seconds means no. |
 | No access to your network | Popcorn refuses loopback, private and link-local addresses, even for allowed hosts. It connects only to addresses it checked. |
@@ -57,7 +58,8 @@ kernel. It boots in about one second.
 
 ### Limits
 
-- A hypervisor escape is rare but possible. Firecracker then still runs inside bubblewrap, as your user. Popcorn does not use the jailer, which needs root.
+- A hypervisor escape is rare but possible. Firecracker then still runs inside bubblewrap and Landlock, as your user. Popcorn does not use the jailer, which needs root.
+- On a kernel without Landlock, Firecracker runs inside bubblewrap only. `console.log` says so.
 - An allowed host can receive data from the corn.
 - The terminal shows output from the corn. A bug in your terminal app is outside Popcorn.
 - Keep your kernel and Firecracker up to date.

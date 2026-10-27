@@ -176,6 +176,7 @@ rm -rf $H
 | `writes_stay_inside_the_folder` | Approved writes never leave the folder or go through a link. |
 | `refuses_home_and_secret_folders` | Home, `/`, folders above home and folders with keys are refused. |
 | `terminal_drops_clipboard_escapes` | Clipboard escapes from the corn never reach your terminal, in any form or split; other output passes. |
+| `landlock_allows_only_what_is_named` (in `tests/`) | `popcorn landlock` allows only the named files and programs. Your home folder, writes, TCP and signals to other programs are refused. |
 | `names_become_safe_account_names` | Typed names become safe Linux account names. |
 
 ## Debugging

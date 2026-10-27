@@ -2582,6 +2582,9 @@ impl Drop for Popcorn {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("landlock") {
+        sandbox::landlock_exec(&args[2..]);
+    }
     if args.get(1).map(String::as_str) == Some("attach") {
         sandbox::attach(std::path::Path::new(args.get(2).map(String::as_str).unwrap_or(".")));
     }

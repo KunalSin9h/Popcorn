@@ -290,7 +290,19 @@ impl Case {
         for rw in [&disk, &self.dir.join("vm")] {
             cmd.arg("--bind").arg(rw).arg(rw);
         }
-        cmd.args(["--dev-bind", "/dev/kvm", "/dev/kvm", "--proc", "/proc", "--"])
+        // The third wall: `popcorn landlock` starts Firecracker under Landlock, limited to exactly
+        // these files. It needs the system libraries to start; Landlock then closes them too.
+        let me = me()?;
+        cmd.arg("--ro-bind").arg(&me).arg(&me);
+        cmd.args(["--ro-bind", "/usr", "/usr", "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64"]);
+        cmd.args(["--dev-bind", "/dev/kvm", "/dev/kvm", "--proc", "/proc", "--"]).arg(&me).arg("landlock");
+        cmd.arg(format!("x:{}", firecracker.display()));
+        for ro in [&kernel, &image, &vm_json].into_iter().chain(skills.as_ref()) {
+            cmd.arg(format!("ro:{}", ro.display()));
+        }
+        cmd.arg(format!("rw:{}", disk.display()))
+            .arg(format!("sock:{}", self.dir.join("vm").display()))
+            .args(["dev:/dev/kvm", "--"])
             .arg(&firecracker)
             .args(["--no-api", "--config-file"])
             .arg(&vm_json)
@@ -341,21 +353,115 @@ impl Case {
 
     /// Open a terminal window with a shell inside the case.
     pub fn open_terminal(&self) -> Result<(), String> {
-        // After an upgrade or rebuild replaces the running binary, Linux reports its path with
-        // " (deleted)". The new binary at the same path attaches the same way, so use it.
-        let me = std::env::current_exe().map_err(|e| e.to_string())?;
-        let me = match me.to_string_lossy().strip_suffix(" (deleted)") {
-            Some(path) => PathBuf::from(path),
-            None => me,
-        };
-        open_in_terminal(&[me.as_os_str(), "attach".as_ref(), self.dir.as_os_str()])
+        open_in_terminal(&[me()?.as_os_str(), "attach".as_ref(), self.dir.as_os_str()])
     }
+}
+
+/// This program. After an upgrade or rebuild replaces the running binary, Linux reports its path
+/// with " (deleted)". The new binary at the same path works the same way, so use it.
+fn me() -> Result<PathBuf, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    // Tests run as a test binary; the VM tests need the real program, as the attach test does.
+    #[cfg(test)]
+    let me = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/popcorn"));
+    Ok(match me.to_string_lossy().strip_suffix(" (deleted)") {
+        Some(path) => PathBuf::from(path),
+        None => me,
+    })
 }
 
 /// The corn's vsock socket. It lives in `vm/`, the only folder of the corn that Firecracker can
 /// write to, so a compromised Firecracker cannot change the corn's other files (such as `share`).
 pub fn sock(dir: &Path) -> PathBuf {
     dir.join("vm/v.sock")
+}
+
+/// `popcorn landlock <rule>... -- <command>`: the third wall. It runs inside bubblewrap, just
+/// before Firecracker. Landlock, a kernel feature that needs no root, limits this process and all
+/// it starts to the files named here, so code that gets out of bubblewrap's view still cannot
+/// open anything else. Rules: `x:` run a file, `ro:` read a file, `rw:` read and write a file,
+/// `dev:` use a device, `sock:` make sockets in a folder. Where the kernel supports it, TCP is
+/// closed, abstract sockets outside are unreachable, and signals cannot leave.
+pub fn landlock_exec(args: &[String]) -> ! {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::process::CommandExt;
+    let fail = |m: String| -> ! {
+        eprintln!("popcorn landlock: {m}");
+        std::process::exit(126)
+    };
+    unsafe extern "C" {
+        fn syscall(n: i64, ...) -> i64;
+        fn prctl(option: i32, ...) -> i32;
+    }
+    const CREATE_RULESET: i64 = 444;
+    const ADD_RULE: i64 = 445;
+    const RESTRICT_SELF: i64 = 446;
+    const EXECUTE: u64 = 1;
+    const WRITE_FILE: u64 = 1 << 1;
+    const READ_FILE: u64 = 1 << 2;
+    const READ_DIR: u64 = 1 << 3;
+    const MAKE_SOCK: u64 = 1 << 9;
+    const IOCTL_DEV: u64 = 1 << 15;
+    #[repr(C)]
+    struct Ruleset {
+        fs: u64,
+        net: u64,
+        scoped: u64,
+    }
+    #[repr(C, packed)]
+    struct PathBeneath {
+        allowed: u64,
+        parent_fd: i32,
+    }
+    let Some(split) = args.iter().position(|a| a == "--") else { fail("no command".into()) };
+    let (rules, cmd) = (&args[..split], &args[split + 1..]);
+    if cmd.is_empty() {
+        fail("no command".into());
+    }
+    let abi = unsafe { syscall(CREATE_RULESET, std::ptr::null::<Ruleset>(), 0usize, 1u32) };
+    if abi < 1 {
+        // ponytail: kernels without Landlock run with two walls; make this fatal once all supported distros have it.
+        eprintln!("popcorn landlock: this kernel has no Landlock; Firecracker runs inside bubblewrap only");
+        let e = Command::new(&cmd[0]).args(&cmd[1..]).exec();
+        fail(format!("cannot start {}: {e}", cmd[0]));
+    }
+    // Every right this kernel knows is handled, so anything not granted below is denied.
+    let mut fs_all = (1 << 13) - 1;
+    for (min, bit) in [(2, 1 << 13), (3, 1 << 14), (5, IOCTL_DEV)] {
+        if abi >= min {
+            fs_all |= bit;
+        }
+    }
+    let attr = Ruleset { fs: fs_all, net: if abi >= 4 { 3 } else { 0 }, scoped: if abi >= 6 { 3 } else { 0 } };
+    let size: usize = if abi >= 6 { 24 } else if abi >= 4 { 16 } else { 8 };
+    let ruleset = unsafe { syscall(CREATE_RULESET, &attr as *const Ruleset, size, 0u32) };
+    if ruleset < 0 {
+        fail(format!("cannot create a ruleset: {}", std::io::Error::last_os_error()));
+    }
+    for rule in rules {
+        let (kind, path) = rule.split_once(':').unwrap_or_else(|| fail(format!("bad rule {rule}")));
+        let allowed = match kind {
+            "x" => EXECUTE | READ_FILE,
+            "ro" => READ_FILE,
+            "rw" => READ_FILE | WRITE_FILE,
+            "dev" => READ_FILE | WRITE_FILE | if abi >= 5 { IOCTL_DEV } else { 0 },
+            "sock" => READ_DIR | MAKE_SOCK,
+            _ => fail(format!("bad rule {rule}")),
+        };
+        const O_PATH: i32 = 0o10000000;
+        let f = fs::OpenOptions::new().read(true).custom_flags(O_PATH).open(path).unwrap_or_else(|e| fail(format!("{path}: {e}")));
+        let beneath = PathBeneath { allowed, parent_fd: f.as_raw_fd() };
+        if unsafe { syscall(ADD_RULE, ruleset, 1i32, &beneath as *const PathBeneath, 0u32) } < 0 {
+            fail(format!("cannot add {rule}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    const PR_SET_NO_NEW_PRIVS: i32 = 38;
+    if unsafe { prctl(PR_SET_NO_NEW_PRIVS, 1u64, 0u64, 0u64, 0u64) } != 0 || unsafe { syscall(RESTRICT_SELF, ruleset, 0u32) } != 0 {
+        fail(format!("cannot restrict: {}", std::io::Error::last_os_error()));
+    }
+    let e = Command::new(&cmd[0]).args(&cmd[1..]).exec();
+    fail(format!("cannot start {}: {e}", cmd[0]))
 }
 
 /// Run a command in a new terminal window. Each terminal takes the command differently;
