@@ -40,6 +40,23 @@ kernel. It boots in about one second.
 
 ## How it keeps you safe
 
+A corn sits inside layered walls. Code in it runs on its own Linux kernel, with no network card. That kernel runs in a Firecracker microVM on KVM, with Firecracker's seccomp filters. Firecracker runs inside bubblewrap, which hides your files, network and processes. Landlock then limits Firecracker to its own few files, no TCP and no signals out. To reach your computer, code must break each wall in turn. Everything that crosses on purpose goes through Popcorn, which asks or checks first: network, Claude and files.
+
+```mermaid
+flowchart TB
+  subgraph landlock["Landlock: only its own files, no TCP"]
+    subgraph bwrap["bubblewrap: no home folder, network or processes"]
+      subgraph fc["Firecracker on KVM, with seccomp"]
+        subgraph corn["🌽 Corn: its own Linux kernel, no network card"]
+          code["Untrusted code and Claude Code"]
+        end
+      end
+    end
+  end
+  code <-->|"vsock only"| popcorn["🍿 Popcorn<br/>asks before each host<br/>adds your Claude token<br/>shows you every file change"]
+  popcorn <--> you["Your computer and the internet"]
+```
+
 | Guarantee | How |
 |---|---|
 | Own kernel | Each corn is a separate VM. A kernel exploit stays inside. |
