@@ -40,21 +40,28 @@ kernel. It boots in about one second.
 
 ## How it keeps you safe
 
-A corn sits inside layered walls. Code in it runs on its own Linux kernel, with no network card. That kernel runs in a Firecracker microVM on KVM, with Firecracker's seccomp filters. Firecracker runs inside bubblewrap, which hides your files, network and processes. Landlock then limits Firecracker to its own few files, no TCP and no signals out. To reach your computer, code must break each wall in turn. Everything that crosses on purpose goes through Popcorn, which asks or checks first: network, Claude and files.
+A corn sits inside four walls. Code must break each one to reach your computer:
+
+1. **Own kernel:** the corn runs its own Linux, with no network card.
+2. **Firecracker:** a microVM on KVM, with _seccomp_ filters.
+3. **bubblewrap:** hides your files, network and processes from Firecracker.
+4. **Landlock:** Firecracker can touch only its own files. No TCP, no signals out.
+
+Everything that crosses on purpose (_network, Claude, files_) goes through Popcorn, which asks or checks first.
 
 ```mermaid
-flowchart TB
-  subgraph landlock["Landlock: only its own files, no TCP"]
-    subgraph bwrap["bubblewrap: no home folder, network or processes"]
-      subgraph fc["Firecracker on KVM, with seccomp"]
-        subgraph corn["🌽 Corn: its own Linux kernel, no network card"]
-          code["Untrusted code and Claude Code"]
+flowchart LR
+  subgraph landlock["Landlock"]
+    subgraph bwrap["bubblewrap"]
+      subgraph fc["Firecracker + seccomp"]
+        subgraph corn["🌽 Corn"]
+          code["Untrusted code<br/>and Claude Code"]
         end
       end
     end
   end
-  code <-->|"vsock only"| popcorn["🍿 Popcorn<br/>asks before each host<br/>adds your Claude token<br/>shows you every file change"]
-  popcorn <--> you["Your computer and the internet"]
+  code <-->|vsock| popcorn["🍿 Popcorn<br/>checks what crosses"]
+  popcorn <--> you["Your computer"]
 ```
 
 | Guarantee | How |
