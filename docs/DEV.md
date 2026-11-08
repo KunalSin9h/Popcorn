@@ -84,7 +84,7 @@ A release has four files: an AppImage, a `.deb`, the compressed workbench image 
 | App version | `version` in `Cargo.toml` |
 | Workbench image | `golden-<version>.ext4.zst`, built by `scripts/release-image.sh` |
 | Image hash | Compiled into the app from `POPCORN_IMAGE_SHA256` |
-| Firecracker, jailer, kernel | Inside both packages, in `/usr/lib/popcorn` |
+| Firecracker, jailer, kernel | Pinned with their SHA-256 in `scripts/fetch-firecracker.sh`, inside both packages, in `/usr/lib/popcorn` |
 
 To make a release, change the version in `Cargo.toml`, commit, then push a tag:
 
