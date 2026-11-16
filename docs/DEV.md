@@ -133,7 +133,7 @@ The corn has no network card. All traffic uses vsock. The host CID is 2.
 
 | Port | Direction | Use |
 |---|---|---|
-| 1080 | corn to host | HTTP CONNECT proxy through the network gate. Public addresses only; 64 connections at a time. |
+| 1080 | corn to host | HTTP proxy through the network gate: CONNECT tunnels and plain `http://` requests. You approve each `host:port`; plain HTTP shows as `http://host:port`. Public addresses only; 64 connections at a time. |
 | 1081 | corn to host | Claude API. The host adds the token and opens TLS. |
 | 1024 | host to corn | Login shell for the terminal |
 | 1025 | host to corn | Files in, as a tar stream, to `~/inbox` |
@@ -169,6 +169,10 @@ rm -rf $H
 |---|---|
 | `case_boots_isolated_and_gated` | No network card. Denied host refused. Internal addresses refused, literal or resolved. Allowed host works. Claude proxy swaps the token, works while sealed, and returns 401 with no token. Token not in the guest. Outbox export drops links. Shared folder: secrets stay home, changes detected, only approved files written. Runs Firecracker inside bubblewrap. A synced skill is in the corn. |
 | `attach_is_responsive` | Terminal echo under 150 ms, `TERM` set, prompt shows the user name. |
+| `plain_http_goes_through_the_same_checks` | Plain `http://` requests wait for your answer as `http://host:port`, and denied means refused. Internal addresses are refused before you are asked. Sealed refuses them. Other schemes, user names in URLs and bad targets are refused. |
+| `allowed_plain_http_reaches_the_server_and_ends` | An allowed plain `http://` request reaches the server, without proxy headers, and the connection ends when the server is done. Needs network. |
+| `plain_http_names_one_host_and_port` | URLs become one `host:port` (port 80 by default) and a path; odd URLs are refused. |
+| `plain_http_head_drops_proxy_headers` | Proxy headers never reach the server, and each request closes its connection. |
 | `internal_addresses_are_not_public` | Loopback, private, link-local, metadata, multicast and mapped IPv6 addresses are refused; public ones pass. |
 | `import_keeps_only_plain_files_inside_quarantine` | Tar reader drops links, devices and unsafe paths. |
 | `shares_through_git_and_trusts_nothing_back` | Ignored files stay home. Other version control folders stay home, and a folder with `.hgignore` rules is refused until they are in `.gitignore`. The corn's links are never offered. Your own edits are flagged. New files are never executable. Applied changes are not offered again. A forged `.git` path and garbage bundles are refused. |

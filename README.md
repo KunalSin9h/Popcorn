@@ -30,7 +30,7 @@ kernel. It boots in about one second.
 <img src="assets/screenshots/review.png" width="340" align="right" alt="Review each changed file before it is written back">
 
 - **Terminal:** a shell in the corn.
-- **Network:** you deny, allow once or always allow each new host. Always allow applies to every corn.
+- **Network:** you deny, allow once or always allow each new host and port, for HTTPS and plain HTTP. Always allow applies to every corn.
 - **Files in:** drop or pick files. They land in `~/inbox`.
 - **Files out:** export from `~/outbox` as copies that cannot run.
 - **Skills:** pick Claude skills from `~/.claude/skills` in Settings. Sync copies them into every corn, one way.

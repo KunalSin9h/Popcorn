@@ -1,6 +1,7 @@
 //! The only way out of a case. The guest dials two vsock ports, which Firecracker turns into
-//! unix sockets here: 1080 is an HTTP CONNECT proxy that asks you about every new host, 1081 is
-//! the Claude API, where the real credential is added on the host so it never exists in the VM.
+//! unix sockets here: 1080 is an HTTP proxy (CONNECT, and plain http:// requests) that asks you
+//! about every new host and port, 1081 is the Claude API, where the real credential is added on
+//! the host so it never exists in the VM.
 use crate::sandbox::Mode;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -342,6 +343,54 @@ pub fn public(ip: IpAddr) -> bool {
     }
 }
 
+/// `host:port` and port of a proxy target. The host keeps no brackets; port 0 is refused.
+fn split_target(target: &str) -> Option<(String, u16)> {
+    let (h, p) = target.rsplit_once(':')?;
+    let port = p.parse::<u16>().ok().filter(|&p| p != 0)?;
+    let h = h.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(h);
+    (!h.is_empty() && !h.contains(['/', '@'])).then(|| (h.to_string(), port))
+}
+
+/// A plain-HTTP proxy request names its server in an absolute `http://` URL. Returns the target
+/// (`host:port`, lowercase, port 80 by default) and the path to send to that server. URLs with
+/// user names, other schemes and odd characters are refused.
+fn http_target(uri: &str) -> Option<(String, String)> {
+    let rest = uri.get(..7).filter(|s| s.eq_ignore_ascii_case("http://")).map(|_| &uri[7..])?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (auth, tail) = rest.split_at(end);
+    if auth.is_empty() || !auth.bytes().all(|b| b.is_ascii_graphic() && b != b'@') {
+        return None;
+    }
+    let tail = tail.split('#').next().unwrap_or("");
+    let path = if tail.starts_with('/') { tail.to_string() } else { format!("/{tail}") };
+    let auth = auth.to_ascii_lowercase();
+    let has_port = if auth.starts_with('[') { auth.contains("]:") } else { auth.contains(':') };
+    Some((if has_port { auth } else { format!("{auth}:80") }, path))
+}
+
+/// The request head sent on for a plain-HTTP request: the path instead of the full URL, no proxy
+/// headers, and `Connection: close`. The connection stays a tunnel to the one server you allowed,
+/// so later requests on it cannot reach another host.
+fn http_head(method: &str, path: &str, version: &str, target: &str, head: &[String]) -> String {
+    let mut out = format!("{method} {path} {version}\r\n");
+    let mut has_host = false;
+    for h in &head[1..] {
+        let name = h.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+        match name.as_str() {
+            "proxy-connection" | "proxy-authorization" | "connection" | "keep-alive" => continue,
+            "host" => has_host = true,
+            _ => {}
+        }
+        out.push_str(h);
+        out.push_str("\r\n");
+    }
+    if !has_host {
+        out.push_str(&format!("Host: {}\r\n", target.strip_suffix(":80").unwrap_or(target)));
+    }
+    out.push_str("Connection: close\r\n\r\n");
+    out
+}
+
 fn egress_conn(c: UnixStream, policy: &Policy, log: &Log, dir: &Path) {
     c.set_read_timeout(Some(HEAD_TIMEOUT)).ok();
     let mut r = BufReader::new(c.try_clone().unwrap());
@@ -351,44 +400,61 @@ fn egress_conn(c: UnixStream, policy: &Policy, log: &Log, dir: &Path) {
     let mut w = c;
     let first = head.first().cloned().unwrap_or_default();
     let mut parts = first.split_whitespace();
-    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let target = target.to_ascii_lowercase();
-    let host = target.rsplit_once(':').map_or(target.as_str(), |(h, _)| h).trim_matches(['[', ']']).to_string();
-    let literal_internal = host.parse::<IpAddr>().is_ok_and(|ip| !public(ip));
-    // Plain-HTTP proxy requests are refused outright: they would let the guest pick any URL per request.
-    // An internal address is refused before you are asked. A name is resolved only after you allow
-    // it, so a name you deny is never looked up.
-    let (ok, why) = if method != "CONNECT" {
-        (false, "plain HTTP")
-    } else if literal_internal {
-        (false, "address on your network")
+    let (method, uri, version) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    // CONNECT names `host:port` and becomes a tunnel. A plain-HTTP request names an http:// URL;
+    // it gets the same checks for its `host:port`, then its request goes on to that server alone.
+    let (target, plain) = if method == "CONNECT" {
+        (Some(uri.to_ascii_lowercase()), None)
     } else {
-        policy.decide(&target)
+        match http_target(uri) {
+            Some((t, path)) if version.starts_with("HTTP/1.") && !method.is_empty() && method.bytes().all(|b| b.is_ascii_uppercase()) => {
+                let h = http_head(method, &path, version, &t, &head);
+                (Some(t), Some(h))
+            }
+            _ => (None, None),
+        }
     };
-    if !ok {
-        let what = if method == "CONNECT" { target.clone() } else { format!("{method} {target}") };
+    let refuse = |mut w: UnixStream, what: String, why: &str| {
         record(log, dir, Event { at: now(), kind: Kind::Blocked, text: format!("{what} ({why})") });
         let _ = w.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        return;
+    };
+    let Some((target, (host, port))) = target.and_then(|t| split_target(&t).map(|hp| (t, hp))) else {
+        return refuse(w, format!("{method} {uri}"), "not a proxy request Popcorn accepts");
+    };
+    // You see plain HTTP as `http://host:port`, so you know it is not encrypted. An allow for it
+    // is kept apart from an allow for a tunnel to the same port.
+    let what = if plain.is_some() { format!("http://{target}") } else { target.clone() };
+    // An internal address is refused before you are asked. A name is resolved only after you
+    // allow it, so a name you deny is never looked up.
+    let (ok, why) = if host.parse::<IpAddr>().is_ok_and(|ip| !public(ip)) { (false, "address on your network") } else { policy.decide(&what) };
+    if !ok {
+        return refuse(w, what, why);
     }
-    let port: u16 = target.rsplit_once(':').and_then(|(_, p)| p.parse().ok()).unwrap_or(443);
     // Connect only to the addresses checked here, so a name cannot change to an internal address
     // between the check and the connection (DNS rebinding).
     let addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs().map(|a| a.collect()).unwrap_or_default();
     let open: Vec<SocketAddr> = addrs.iter().copied().filter(|a| public(a.ip())).collect();
     if !addrs.is_empty() && open.is_empty() {
-        record(log, dir, Event { at: now(), kind: Kind::Blocked, text: format!("{target} (resolves to an address on your network)") });
-        let _ = w.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        return;
+        return refuse(w, what, "resolves to an address on your network");
     }
     let Ok(up) = TcpStream::connect(&open[..]) else {
         let _ = w.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
         return;
     };
-    record(log, dir, Event { at: now(), kind: Kind::Allowed, text: if why.is_empty() { target.clone() } else { format!("{target} ({why})") } });
-    let _ = w.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
-    // Any bytes the client sent after the CONNECT head are still in the reader's buffer.
+    let note = if plain.is_some() { "plain HTTP" } else { "" };
+    let why = [why, note].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+    record(log, dir, Event { at: now(), kind: Kind::Allowed, text: if why.is_empty() { what } else { format!("{what} ({why})") } });
     let mut up_w = up.try_clone().unwrap();
+    match &plain {
+        Some(h) => {
+            let _ = up_w.write_all(h.as_bytes());
+        }
+        None => {
+            let _ = w.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+        }
+    }
+    // Any bytes the client sent after the head (a request body, or the TLS hello) are still in
+    // the reader's buffer.
     let buffered = r.buffer().to_vec();
     let _ = up_w.write_all(&buffered);
     let mut guest = w;
@@ -398,6 +464,9 @@ fn egress_conn(c: UnixStream, policy: &Policy, log: &Log, dir: &Path) {
         let _ = up_w.shutdown(std::net::Shutdown::Write);
     });
     let _ = std::io::copy(&mut up_r, &mut guest);
+    // The server is done. Close the corn's side too: the copy thread holds a clone of it, so
+    // without this a client that reads to the end (plain HTTP without a length) waits forever.
+    let _ = guest.shutdown(std::net::Shutdown::Both);
 }
 
 fn tls() -> Arc<rustls::ClientConfig> {
@@ -550,6 +619,95 @@ mod tests {
         for ip in ["1.1.1.1", "104.18.0.1", "2606:4700::1111"] {
             assert!(public(ip.parse().unwrap()), "{ip} must be reachable");
         }
+    }
+
+    #[test]
+    fn plain_http_names_one_host_and_port() {
+        let t = |u: &str| http_target(u);
+        assert_eq!(t("http://72.62.1.108/api/v1/x?a=1"), Some(("72.62.1.108:80".into(), "/api/v1/x?a=1".into())));
+        assert_eq!(t("HTTP://Example.COM:3000"), Some(("example.com:3000".into(), "/".into())));
+        assert_eq!(t("http://example.com?q#frag"), Some(("example.com:80".into(), "/?q".into())));
+        assert_eq!(t("http://[2606:4700::1111]/"), Some(("[2606:4700::1111]:80".into(), "/".into())));
+        assert_eq!(t("http://[2606:4700::1111]:8080/x"), Some(("[2606:4700::1111]:8080".into(), "/x".into())));
+        for bad in ["https://example.com/", "/just/a/path", "ftp://example.com/", "http://", "http:///x", "http://user:pw@example.com/", "http://a@127.0.0.1/"] {
+            assert_eq!(t(bad), None, "{bad} must be refused");
+        }
+        assert_eq!(split_target("example.com:80"), Some(("example.com".into(), 80)));
+        assert_eq!(split_target("[::1]:443"), Some(("::1".into(), 443)));
+        for bad in ["example.com", "example.com:0", "example.com:99999", ":80", "a/b:80"] {
+            assert_eq!(split_target(bad), None, "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn plain_http_head_drops_proxy_headers() {
+        let head: Vec<String> = ["GET http://x.test/a HTTP/1.1", "Host: x.test", "Proxy-Authorization: Basic eA==", "Proxy-Connection: keep-alive", "Connection: keep-alive", "Accept: */*"].map(String::from).to_vec();
+        assert_eq!(http_head("GET", "/a", "HTTP/1.1", "x.test:80", &head), "GET /a HTTP/1.1\r\nHost: x.test\r\nAccept: */*\r\nConnection: close\r\n\r\n");
+        let bare: Vec<String> = vec!["GET http://x.test:3000/ HTTP/1.0".into()];
+        assert_eq!(http_head("GET", "/", "HTTP/1.0", "x.test:3000", &bare), "GET / HTTP/1.0\r\nHost: x.test:3000\r\nConnection: close\r\n\r\n");
+    }
+
+    /// Send one request head to the gate; return its answer, the asks it raised and the log.
+    fn through_gate(req: &str, mode: Mode, answer: Option<Answer>) -> (String, Vec<String>, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!("popcorn-gate-{}-{}", std::process::id(), req.len()));
+        fs::create_dir_all(&dir).unwrap();
+        let (policy, log): (Arc<Policy>, Log) = (Policy::new(mode), Arc::default());
+        let (mut guest, host) = UnixStream::pair().unwrap();
+        let (p, l, d) = (policy.clone(), log.clone(), dir.clone());
+        let gate = std::thread::spawn(move || egress_conn(host, &p, &l, &d));
+        guest.write_all(req.as_bytes()).unwrap();
+        let mut asked = Vec::new();
+        if let Some(a) = answer {
+            let ask = (0..200)
+                .find_map(|_| {
+                    let ask = policy.asks.lock().unwrap().pop();
+                    if ask.is_none() {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    ask
+                })
+                .expect("the gate asks");
+            asked.push(ask.target.clone());
+            ask.answer(a);
+        }
+        let mut out = String::new();
+        guest.read_to_string(&mut out).unwrap();
+        gate.join().unwrap();
+        fs::remove_dir_all(&dir).ok();
+        let texts = log.lock().unwrap().iter().map(|e| e.text.clone()).collect();
+        (out, asked, texts)
+    }
+
+    #[test]
+    fn plain_http_goes_through_the_same_checks() {
+        // You are asked, and see that it is plain HTTP. Denied means refused.
+        let (out, asked, log) = through_gate("GET http://popcorn-test.invalid:3000/x HTTP/1.1\r\nHost: popcorn-test.invalid\r\n\r\n", Mode::Ask, Some(Answer::Deny));
+        assert_eq!(asked, ["http://popcorn-test.invalid:3000"]);
+        assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+        assert_eq!(log, ["http://popcorn-test.invalid:3000 (denied by you)"]);
+        // Internal addresses are refused before anyone is asked, also for plain HTTP.
+        for target in ["http://127.0.0.1/", "http://169.254.169.254/latest/", "http://[::1]:8080/", "http://10.0.0.1:80/"] {
+            let (out, _, log) = through_gate(&format!("GET {target} HTTP/1.1\r\n\r\n"), Mode::Ask, None);
+            assert!(out.starts_with("HTTP/1.1 403") && log[0].ends_with("(address on your network)"), "{target}: {out} {log:?}");
+        }
+        // Sealed refuses it. Other request forms are refused outright.
+        let (out, _, _) = through_gate("GET http://example.com/ HTTP/1.1\r\n\r\n", Mode::Sealed, None);
+        assert!(out.starts_with("HTTP/1.1 403"));
+        for req in ["GET https://example.com/ HTTP/1.1", "GET /local HTTP/1.1", "GET http://u@example.com/ HTTP/1.1", "get http://example.com/ HTTP/1.1", "GET http://example.com/ SPDY/3", "CONNECT example.com HTTP/1.1"] {
+            let (out, _, log) = through_gate(&format!("{req}\r\n\r\n"), Mode::Ask, None);
+            assert!(out.starts_with("HTTP/1.1 403") && log[0].ends_with("(not a proxy request Popcorn accepts)"), "{req}: {out} {log:?}");
+        }
+    }
+
+    /// Needs network access: run with `--include-ignored`.
+    #[test]
+    #[ignore]
+    fn allowed_plain_http_reaches_the_server_and_ends() {
+        let (out, asked, log) = through_gate("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nProxy-Connection: keep-alive\r\n\r\n", Mode::Ask, Some(Answer::Once));
+        assert_eq!(asked, ["http://example.com:80"]);
+        assert_eq!(log, ["http://example.com:80 (allowed once, plain HTTP)"]);
+        // `through_gate` reads to the end, so this also proves the gate closes the connection.
+        assert!(out.starts_with("HTTP/1.1 200") && out.to_lowercase().contains("example domain"), "{out}");
     }
 
     /// One tar entry: name, typeflag, contents.
